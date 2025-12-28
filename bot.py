@@ -1,7 +1,8 @@
 import os
 import datetime
+import json
 import asyncpg
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import (
     Update,
@@ -22,6 +23,7 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = os.getenv("ADMIN_ID")  # numeric string
+DELIVERY_FEE_EUR = float(os.getenv("DELIVERY_FEE_EUR", "5.0"))  # you can change in Railway Variables
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing (Railway Variables -> BOT_TOKEN)")
@@ -36,6 +38,14 @@ CLAIM_IMAGE_PATH = "claim.png"
 HOME_IMAGE_PATH = "home.png"
 SHOP_IMAGE_PATH = "shop.png"
 
+def eur_to_cents(x: float) -> int:
+    return int(round(x * 100))
+
+def cents_to_eur_str(c: int) -> str:
+    return f"{c/100:.2f}€"
+
+DELIVERY_FEE_CENTS = eur_to_cents(DELIVERY_FEE_EUR)
+
 # ========= DB SCHEMA =========
 CREATE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -45,7 +55,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT,
   language TEXT DEFAULT 'et',
   status TEXT DEFAULT 'NEW',          -- NEW/PENDING/SAFE/DECLINED
-  state TEXT DEFAULT NULL,            -- NULL/WAITING_REF
+  state TEXT DEFAULT NULL,            -- NULL/WAITING_REF/BUY_ADDRESS
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -62,12 +72,35 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 """
 
+# price_cents added
 CREATE_ITEMS_SQL = """
 CREATE TABLE IF NOT EXISTS items (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   short_text TEXT NOT NULL,
+  price_cents INT NOT NULL DEFAULT 0,
   photo_file_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+CREATE_SETTINGS_SQL = """
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"""
+
+CREATE_ORDERS_SQL = """
+CREATE TABLE IF NOT EXISTS orders (
+  id SERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(user_id),
+  cart_json JSONB NOT NULL,
+  subtotal_cents INT NOT NULL,
+  delivery BOOLEAN NOT NULL,
+  address TEXT NULL,
+  total_cents INT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'NEW',   -- NEW/SEEN/DONE
   created_at TIMESTAMPTZ DEFAULT now()
 );
 """
@@ -83,12 +116,16 @@ ALTER_USERS_SQL = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();",
 ]
 
+ALTER_ITEMS_SQL = [
+    "ALTER TABLE items ADD COLUMN IF NOT EXISTS price_cents INT NOT NULL DEFAULT 0;",
+]
+
 # ========= TEXTS =========
 TEXTS: Dict[str, Dict[str, str]] = {
     "et": {
-        "welcome": "🖤 Tere! Vajuta Verify",
+        "welcome": "Tere! Vajuta Verify",
         "verify": "✅ Verify",
-        "waiting_ref": "🖤 Kirjuta oma sõbra @username, kelle käest sa selle boti said (näiteks: @mart).",
+        "waiting_ref": "Kirjuta oma sõbra @username, kelle käest sa selle boti said (näiteks: @mart).",
         "invalid_ref": "❌ Palun kirjuta korrektne @username (peab algama @-ga). Proovi uuesti.",
         "wait_admin": "⏳ Aitäh! Oota palun admini vastust.",
         "already_pending": "⏳ Su verifitseerimine on juba ootel. Oota admini vastust.",
@@ -96,32 +133,49 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "declined": "❌ Admin lükkas su verifitseerimise tagasi.",
         "removed_safe": "❌ Admin eemaldas sind SAFE listist. Tee /start ja verifitseeri uuesti.",
         "added_safe": "✅ Admin lisas sind SAFE listi. Tee /start",
-        "do_start": "🖤 Tee /start",
+        "do_start": "Tee /start",
         "safe_welcome": (
-            "🖤 *The UnderGround Market*\n\n"
-            "Siin saad vaadata pakkumisi, teha oste ja hallata oma kontot.\n"
+            "*The UnderGround Market*\n\n"
+            "Siin saad vaadata pakkumisi ja teha oste.\n"
             "Vali alt menüüst üks valik."
         ),
-        "shop_title": "🖤 *Shop*\nVali toode.",
-        "shop_empty": "🖤 Shop on hetkel tühi.",
-        "help_text": "🖤 Help: kirjuta adminile.",
-        "account_text": "🖤 Account",
-        "buy_soon": "🖤 Buy: tuleb varsti.",
-        "admin_add_name": "🖤 /additem\nSaada itemi nimi:",
+        "shop_title": "*Shop*\nVali toode.",
+        "shop_empty": "Shop on hetkel tühi.",
+        "help_text": "Help: kirjuta adminile.",
+        "account_text": "Account",
+        "buy_offline": "❌ Praegu on operator OFFLINE.",
+        "buy_intro": "*Buy*\nVali toode ja kogus. Kui valmis, vajuta Next.",
+        "buy_cart": "Cart",
+        "buy_next": "✅ Next",
+        "buy_clear": "❌ Clear",
+        "buy_choose_qty": "Vali kogus:",
+        "buy_delivery_q": "Kas on vaja delivery?",
+        "buy_yes": "✅ Jah",
+        "buy_no": "❌ Ei",
+        "buy_send_address": f"Kirjuta oma aadress.\n\nDelivery hind: {cents_to_eur_str(DELIVERY_FEE_CENTS)}\nKellaaja kirjutab admin pärast DM.",
+        "buy_order_sent": "✅ Order saadetud. Admin kirjutab sulle.",
+        "buy_need_items": "❌ Lisa vähemalt 1 item carti.",
+        "admin_add_name": "/additem\nSaada itemi nimi:",
         "admin_add_text": "Saada lühike tekst (kirjeldus):",
+        "admin_add_price": "Saada hind EUR (näiteks: 25 või 25.50):",
         "admin_add_photo": "Saada nüüd pilt (foto) selle itemi jaoks:",
         "admin_add_done": "✅ Item lisatud Shopi!",
-        "admin_remove_pick": "🖤 Vali item, mida eemaldada:",
+        "admin_remove_pick": "Vali item, mida eemaldada:",
         "admin_removed": "✅ Item eemaldatud.",
-        "admin_remove_empty": "🖤 Pole midagi eemaldada.",
+        "admin_remove_empty": "Pole midagi eemaldada.",
         "admin_bad": "❌ Midagi läks valesti.",
         "back": "⬅️ Tagasi",
         "home": "⬅️ Home",
+        "online_on": "✅ ONLINE",
+        "online_off": "❌ OFFLINE",
+        "loc_usage": "Usage: /loc <order_id> <asukoht ja kellaaeg>",
+        "loc_sent": "✅ Saadetud.",
+        "order_pickup_msg": "✅ Sinu order on valmis.\nAsukoht ja kellaaeg:",
     },
     "ru": {
-        "welcome": "🖤 Привет! Нажми Verify",
+        "welcome": "Привет! Нажми Verify",
         "verify": "✅ Verify",
-        "waiting_ref": "🖤 Напиши @username друга, от которого ты получил бота (например: @mart).",
+        "waiting_ref": "Напиши @username друга, от которого ты получил бота (например: @mart).",
         "invalid_ref": "❌ Напиши корректный @username (должен начинаться с @). Попробуй ещё раз.",
         "wait_admin": "⏳ Спасибо! Дождись решения админа.",
         "already_pending": "⏳ Проверка уже в ожидании.",
@@ -129,32 +183,49 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "declined": "❌ Админ отклонил проверку.",
         "removed_safe": "❌ Админ удалил тебя из SAFE. Сделай /start и пройди проверку снова.",
         "added_safe": "✅ Админ добавил тебя в SAFE. Напиши /start",
-        "do_start": "🖤 Напиши /start",
+        "do_start": "Напиши /start",
         "safe_welcome": (
-            "🖤 *The UnderGround Market*\n\n"
-            "Здесь ты можешь смотреть предложения, покупать и управлять аккаунтом.\n"
+            "*The UnderGround Market*\n\n"
+            "Здесь ты можешь смотреть товары и делать заказы.\n"
             "Выбери пункт меню ниже."
         ),
-        "shop_title": "🖤 *Shop*\nВыбери товар.",
-        "shop_empty": "🖤 Shop сейчас пуст.",
-        "help_text": "🖤 Help: напиши админу.",
-        "account_text": "🖤 Account",
-        "buy_soon": "🖤 Buy: скоро будет.",
-        "admin_add_name": "🖤 /additem\nОтправь название товара:",
+        "shop_title": "*Shop*\nВыбери товар.",
+        "shop_empty": "Shop сейчас пуст.",
+        "help_text": "Help: напиши админу.",
+        "account_text": "Account",
+        "buy_offline": "❌ Сейчас оператор OFFLINE.",
+        "buy_intro": "*Buy*\nВыбери товар и количество. Когда готов, нажми Next.",
+        "buy_cart": "Cart",
+        "buy_next": "✅ Next",
+        "buy_clear": "❌ Clear",
+        "buy_choose_qty": "Выбери количество:",
+        "buy_delivery_q": "Нужна доставка?",
+        "buy_yes": "✅ Да",
+        "buy_no": "❌ Нет",
+        "buy_send_address": f"Напиши адрес.\n\nЦена доставки: {cents_to_eur_str(DELIVERY_FEE_CENTS)}\nВремя админ напишет позже в DM.",
+        "buy_order_sent": "✅ Заказ отправлен. Админ напишет тебе.",
+        "buy_need_items": "❌ Добавь хотя бы 1 товар в cart.",
+        "admin_add_name": "/additem\nОтправь название товара:",
         "admin_add_text": "Отправь короткий текст (описание):",
-        "admin_add_photo": "Отправь фото товара:",
+        "admin_add_price": "Отправь цену EUR (пример: 25 или 25.50):",
+        "admin_add_photo": "Теперь отправь фото товара:",
         "admin_add_done": "✅ Товар добавлен в Shop!",
-        "admin_remove_pick": "🖤 Выбери товар для удаления:",
+        "admin_remove_pick": "Выбери товар для удаления:",
         "admin_removed": "✅ Удалено.",
-        "admin_remove_empty": "🖤 Нечего удалять.",
+        "admin_remove_empty": "Нечего удалять.",
         "admin_bad": "❌ Что-то пошло не так.",
         "back": "⬅️ Назад",
         "home": "⬅️ Home",
+        "online_on": "✅ ONLINE",
+        "online_off": "❌ OFFLINE",
+        "loc_usage": "Usage: /loc <order_id> <место и время>",
+        "loc_sent": "✅ Отправлено.",
+        "order_pickup_msg": "✅ Твой заказ готов.\nМесто и время:",
     },
     "en": {
-        "welcome": "🖤 Hi! Press Verify",
+        "welcome": "Hi! Press Verify",
         "verify": "✅ Verify",
-        "waiting_ref": "🖤 Send your friend's @username who gave you this bot (example: @mart).",
+        "waiting_ref": "Send your friend's @username who gave you this bot (example: @mart).",
         "invalid_ref": "❌ Please send a valid @username (must start with @). Try again.",
         "wait_admin": "⏳ Thanks. Wait for admin approval.",
         "already_pending": "⏳ Verification is pending.",
@@ -162,27 +233,44 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "declined": "❌ Admin declined your verification.",
         "removed_safe": "❌ Admin removed you from SAFE. Do /start and verify again.",
         "added_safe": "✅ Admin added you to SAFE. Send /start",
-        "do_start": "🖤 Send /start",
+        "do_start": "Send /start",
         "safe_welcome": (
-            "🖤 *The UnderGround Market*\n\n"
-            "Browse offers, buy items, and manage your account.\n"
+            "*The UnderGround Market*\n\n"
+            "Browse items and place orders.\n"
             "Choose an option below."
         ),
-        "shop_title": "🖤 *Shop*\nChoose an item.",
-        "shop_empty": "🖤 Shop is empty.",
-        "help_text": "🖤 Help: contact admin.",
-        "account_text": "🖤 Account",
-        "buy_soon": "🖤 Buy: coming soon.",
-        "admin_add_name": "🖤 /additem\nSend item name:",
+        "shop_title": "*Shop*\nChoose an item.",
+        "shop_empty": "Shop is empty.",
+        "help_text": "Help: contact admin.",
+        "account_text": "Account",
+        "buy_offline": "❌ Operator is OFFLINE right now.",
+        "buy_intro": "*Buy*\nPick items and quantities. When ready, press Next.",
+        "buy_cart": "Cart",
+        "buy_next": "✅ Next",
+        "buy_clear": "❌ Clear",
+        "buy_choose_qty": "Choose quantity:",
+        "buy_delivery_q": "Need delivery?",
+        "buy_yes": "✅ Yes",
+        "buy_no": "❌ No",
+        "buy_send_address": f"Send your address.\n\nDelivery fee: {cents_to_eur_str(DELIVERY_FEE_CENTS)}\nAdmin will DM you the time.",
+        "buy_order_sent": "✅ Order sent. Admin will DM you.",
+        "buy_need_items": "❌ Add at least 1 item to cart.",
+        "admin_add_name": "/additem\nSend item name:",
         "admin_add_text": "Send short text (description):",
-        "admin_add_photo": "Send item photo:",
+        "admin_add_price": "Send price EUR (example: 25 or 25.50):",
+        "admin_add_photo": "Now send item photo:",
         "admin_add_done": "✅ Item added to Shop!",
-        "admin_remove_pick": "🖤 Pick an item to remove:",
+        "admin_remove_pick": "Pick an item to remove:",
         "admin_removed": "✅ Removed.",
-        "admin_remove_empty": "🖤 Nothing to remove.",
+        "admin_remove_empty": "Nothing to remove.",
         "admin_bad": "❌ Something went wrong.",
         "back": "⬅️ Back",
         "home": "⬅️ Home",
+        "online_on": "✅ ONLINE",
+        "online_off": "❌ OFFLINE",
+        "loc_usage": "Usage: /loc <order_id> <location and time>",
+        "loc_sent": "✅ Sent.",
+        "order_pickup_msg": "✅ Your order is ready.\nLocation and time:",
     },
 }
 
@@ -206,19 +294,19 @@ def kb_languages_and_verify(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
             InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
         ],
-        [InlineKeyboardButton("✅ Verify", callback_data="verify")],
+        [InlineKeyboardButton(t(lang, "verify"), callback_data="verify")],
     ])
 
 def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
-    # Home button removed; home.png is the "home screen"
+    # no Home button on home screen
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🖤 Shop", callback_data="safe:shop"),
-            InlineKeyboardButton("🖤 Buy", callback_data="safe:buy"),
+            InlineKeyboardButton("Shop", callback_data="safe:shop"),
+            InlineKeyboardButton("Buy", callback_data="safe:buy"),
         ],
         [
-            InlineKeyboardButton("🖤 Help", callback_data="safe:help"),
-            InlineKeyboardButton("🖤 Account", callback_data="safe:account"),
+            InlineKeyboardButton("Help", callback_data="safe:help"),
+            InlineKeyboardButton("Account", callback_data="safe:account"),
         ],
         [
             InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
@@ -230,9 +318,9 @@ def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
 def kb_shop_items(lang: str, items: List[asyncpg.Record]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for it in items:
-        # remove emoji from item buttons as requested
-        rows.append([InlineKeyboardButton(f"{it['name']}", callback_data=f"item:{it['id']}")])
-    rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])  # back arrow + Home
+        price = cents_to_eur_str(int(it["price_cents"]))
+        rows.append([InlineKeyboardButton(f"{it['name']} — {price}", callback_data=f"item:{it['id']}")])
+    rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])
     rows.append([
         InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
         InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
@@ -241,7 +329,6 @@ def kb_shop_items(lang: str, items: List[asyncpg.Record]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(rows)
 
 def kb_item_detail(lang: str) -> InlineKeyboardMarkup:
-    # back/home use back arrow emoji
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t(lang, "back"), callback_data="safe:shop")],
         [InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")],
@@ -250,6 +337,51 @@ def kb_item_detail(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
             InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
         ],
+    ])
+
+def kb_buy_menu(lang: str, items: List[asyncpg.Record], cart: Dict[int, int], subtotal_cents: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for it in items:
+        item_id = int(it["id"])
+        qty = cart.get(item_id, 0)
+        price = cents_to_eur_str(int(it["price_cents"]))
+        label = f"{it['name']} — {price}"
+        if qty > 0:
+            label += f" (x{qty})"
+        rows.append([InlineKeyboardButton(label, callback_data=f"buy:item:{item_id}")])
+
+    rows.append([
+        InlineKeyboardButton(t(lang, "buy_clear"), callback_data="buy:clear"),
+        InlineKeyboardButton(t(lang, "buy_next"), callback_data="buy:next"),
+    ])
+    rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])
+    rows.append([
+        InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+        InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+        InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+def kb_qty(lang: str, item_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1", callback_data=f"buy:qty:{item_id}:1"),
+            InlineKeyboardButton("2", callback_data=f"buy:qty:{item_id}:2"),
+            InlineKeyboardButton("3", callback_data=f"buy:qty:{item_id}:3"),
+        ],
+        [
+            InlineKeyboardButton("4", callback_data=f"buy:qty:{item_id}:4"),
+            InlineKeyboardButton("5", callback_data=f"buy:qty:{item_id}:5"),
+            InlineKeyboardButton("0", callback_data=f"buy:qty:{item_id}:0"),
+        ],
+        [InlineKeyboardButton(t(lang, "back"), callback_data="buy:back")],
+    ])
+
+def kb_delivery(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(lang, "buy_yes"), callback_data="buy:delivery:yes")],
+        [InlineKeyboardButton(t(lang, "buy_no"), callback_data="buy:delivery:no")],
+        [InlineKeyboardButton(t(lang, "back"), callback_data="buy:back")],
     ])
 
 def kb_admin_decision(claim_id: int) -> InlineKeyboardMarkup:
@@ -314,19 +446,51 @@ async def decide_claim(pool: asyncpg.Pool, claim_id: int, decision: str) -> None
     await pool.execute("UPDATE claims SET status=$1, decided_at=now() WHERE id=$2", decision, claim_id)
 
 async def list_items(pool: asyncpg.Pool) -> List[asyncpg.Record]:
-    return await pool.fetch("SELECT id, name, short_text, photo_file_id FROM items ORDER BY id ASC")
+    return await pool.fetch("SELECT id, name, short_text, price_cents, photo_file_id FROM items ORDER BY id ASC")
 
 async def get_item(pool: asyncpg.Pool, item_id: int) -> Optional[asyncpg.Record]:
-    return await pool.fetchrow("SELECT id, name, short_text, photo_file_id FROM items WHERE id=$1", item_id)
+    return await pool.fetchrow("SELECT id, name, short_text, price_cents, photo_file_id FROM items WHERE id=$1", item_id)
 
-async def add_item(pool: asyncpg.Pool, name: str, short_text: str, photo_file_id: str) -> None:
+async def add_item(pool: asyncpg.Pool, name: str, short_text: str, price_cents: int, photo_file_id: str) -> None:
     await pool.execute(
-        "INSERT INTO items (name, short_text, photo_file_id) VALUES ($1, $2, $3)",
-        name, short_text, photo_file_id
+        "INSERT INTO items (name, short_text, price_cents, photo_file_id) VALUES ($1, $2, $3, $4)",
+        name, short_text, price_cents, photo_file_id
     )
 
 async def remove_item(pool: asyncpg.Pool, item_id: int) -> None:
     await pool.execute("DELETE FROM items WHERE id=$1", item_id)
+
+async def get_setting(pool: asyncpg.Pool, key: str, default: str) -> str:
+    row = await pool.fetchrow("SELECT value FROM settings WHERE key=$1", key)
+    return row["value"] if row else default
+
+async def set_setting(pool: asyncpg.Pool, key: str, value: str) -> None:
+    await pool.execute(
+        "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+        key, value
+    )
+
+async def create_order(
+    pool: asyncpg.Pool,
+    user_id: int,
+    cart: Dict[int, int],
+    subtotal_cents: int,
+    delivery: bool,
+    address: Optional[str],
+    total_cents: int,
+) -> int:
+    row = await pool.fetchrow(
+        """
+        INSERT INTO orders (user_id, cart_json, subtotal_cents, delivery, address, total_cents)
+        VALUES ($1, $2::jsonb, $3, $4, $5, $6)
+        RETURNING id
+        """,
+        user_id, json.dumps(cart), subtotal_cents, delivery, address, total_cents
+    )
+    return int(row["id"])
+
+async def get_order(pool: asyncpg.Pool, order_id: int) -> Optional[asyncpg.Record]:
+    return await pool.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
 
 # ========= LIFECYCLE =========
 async def on_startup(app: Application) -> None:
@@ -337,7 +501,16 @@ async def on_startup(app: Application) -> None:
         for q in ALTER_USERS_SQL:
             await conn.execute(q)
         await conn.execute(CREATE_CLAIMS_SQL)
+        await conn.execute(CREATE_SETTINGS_SQL)
         await conn.execute(CREATE_ITEMS_SQL)
+        for q in ALTER_ITEMS_SQL:
+            await conn.execute(q)
+        await conn.execute(CREATE_ORDERS_SQL)
+
+        # default operator online = true
+        cur = await conn.fetchrow("SELECT value FROM settings WHERE key='operator_online'")
+        if not cur:
+            await conn.execute("INSERT INTO settings (key, value) VALUES ('operator_online', 'true')")
 
 async def on_shutdown(app: Application) -> None:
     pool = app.bot_data.get("db_pool")
@@ -351,7 +524,39 @@ def is_admin(uid: Optional[int]) -> bool:
 def reset_additem(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("additem", None)
 
-# ========= HOME SENDER =========
+def get_cart(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, int]:
+    buy = context.user_data.get("buy")
+    if not buy or not isinstance(buy, dict):
+        buy = {"cart": {}, "subtotal_cents": 0}
+        context.user_data["buy"] = buy
+    cart = buy.get("cart")
+    if not cart or not isinstance(cart, dict):
+        buy["cart"] = {}
+    # ensure int keys
+    cart2: Dict[int, int] = {}
+    for k, v in buy["cart"].items():
+        try:
+            cart2[int(k)] = int(v)
+        except Exception:
+            pass
+    buy["cart"] = cart2
+    return cart2
+
+async def recompute_subtotal(pool: asyncpg.Pool, cart: Dict[int, int]) -> int:
+    if not cart:
+        return 0
+    item_ids = list(cart.keys())
+    rows = await pool.fetch(
+        "SELECT id, price_cents FROM items WHERE id = ANY($1::int[])",
+        item_ids
+    )
+    price_map = {int(r["id"]): int(r["price_cents"]) for r in rows}
+    subtotal = 0
+    for iid, qty in cart.items():
+        subtotal += price_map.get(iid, 0) * max(qty, 0)
+    return subtotal
+
+# ========= HOME / SCREENS =========
 async def send_home(chat_id: int, lang: str, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         with open(HOME_IMAGE_PATH, "rb") as f:
@@ -422,6 +627,7 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     data = query.data or ""
     is_photo = bool(query.message and getattr(query.message, "photo", None))
 
+    # ---- LANGUAGE ----
     if data.startswith("lang:"):
         new_lang = data.split(":", 1)[1]
         if new_lang not in ("et", "ru", "en"):
@@ -432,6 +638,19 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         status2 = (db_user2["status"] if db_user2 else "NEW")
         state2 = (db_user2["state"] if db_user2 else None)
 
+        # detect if buy menu by callback buttons containing buy:
+        def is_buy_screen() -> bool:
+            rm = getattr(query.message, "reply_markup", None)
+            if not rm or not rm.inline_keyboard:
+                return False
+            for row in rm.inline_keyboard:
+                for btn in row:
+                    cd = getattr(btn, "callback_data", "") or ""
+                    if cd.startswith("buy:"):
+                        return True
+            return False
+
+        # detect shop list by item:
         def is_shop_list_screen() -> bool:
             rm = getattr(query.message, "reply_markup", None)
             if not rm or not rm.inline_keyboard:
@@ -444,33 +663,40 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return False
 
         if status2 == "SAFE":
+            # refresh buy screen
+            if is_buy_screen():
+                items = await list_items(pool)
+                cart = get_cart(context)
+                subtotal = await recompute_subtotal(pool, cart)
+                context.user_data["buy"]["subtotal_cents"] = subtotal
+                text = f"{t(new_lang,'buy_intro')}\n\n{t(new_lang,'buy_cart')}: {cents_to_eur_str(subtotal)}"
+                kb = kb_buy_menu(new_lang, items, cart, subtotal)
+                if is_photo:
+                    await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
+                else:
+                    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+                return
+
+            # refresh shop list
             if is_shop_list_screen():
                 items = await list_items(pool)
                 if items:
-                    new_text = t(new_lang, "shop_title")
-                    new_kb = kb_shop_items(new_lang, items)
+                    text = t(new_lang, "shop_title")
+                    kb = kb_shop_items(new_lang, items)
                 else:
-                    new_text = t(new_lang, "shop_empty")
-                    new_kb = kb_safe_menu(new_lang)
-
+                    text = t(new_lang, "shop_empty")
+                    kb = kb_safe_menu(new_lang)
                 if is_photo:
-                    await query.edit_message_caption(caption=new_text, reply_markup=new_kb, parse_mode="Markdown")
+                    await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
                 else:
-                    await query.edit_message_text(new_text, reply_markup=new_kb, parse_mode="Markdown")
+                    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
                 return
 
+            # otherwise refresh home caption/text
             if is_photo:
-                await query.edit_message_caption(
-                    caption=t(new_lang, "safe_welcome"),
-                    reply_markup=kb_safe_menu(new_lang),
-                    parse_mode="Markdown",
-                )
+                await query.edit_message_caption(caption=t(new_lang, "safe_welcome"), reply_markup=kb_safe_menu(new_lang), parse_mode="Markdown")
             else:
-                await query.edit_message_text(
-                    t(new_lang, "safe_welcome"),
-                    reply_markup=kb_safe_menu(new_lang),
-                    parse_mode="Markdown",
-                )
+                await query.edit_message_text(t(new_lang, "safe_welcome"), reply_markup=kb_safe_menu(new_lang), parse_mode="Markdown")
             return
 
         if status2 == "PENDING":
@@ -487,12 +713,22 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await query.edit_message_text(t(new_lang, "waiting_ref"), reply_markup=kb_languages())
             return
 
+        if state2 == "BUY_ADDRESS":
+            # just change prompt
+            if is_photo:
+                await query.edit_message_caption(caption=t(new_lang, "buy_send_address"), reply_markup=kb_languages())
+            else:
+                await query.edit_message_text(t(new_lang, "buy_send_address"), reply_markup=kb_languages())
+            return
+
+        # NEW/DECLINED
         if is_photo:
             await query.edit_message_caption(caption=t(new_lang, "welcome"), reply_markup=kb_languages_and_verify(new_lang))
         else:
             await query.edit_message_text(t(new_lang, "welcome"), reply_markup=kb_languages_and_verify(new_lang))
         return
 
+    # ---- VERIFY ----
     if data == "verify":
         if status == "PENDING":
             if is_photo:
@@ -527,17 +763,13 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db_user = await get_user(pool, user.id)
     lang = (db_user["language"] if db_user and db_user["language"] else "et")
     status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+    chat_id = query.message.chat_id
 
     if status != "SAFE":
         await query.edit_message_text(t(lang, "do_start"), reply_markup=kb_languages())
         return
 
     data = query.data or ""
-    chat_id = query.message.chat_id
-
-    if data == "safe:buy":
-        await query.edit_message_text(t(lang, "buy_soon"), reply_markup=kb_safe_menu(lang))
-        return
 
     if data == "safe:help":
         await query.edit_message_text(t(lang, "help_text"), reply_markup=kb_safe_menu(lang))
@@ -549,6 +781,10 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=kb_safe_menu(lang),
             parse_mode="Markdown",
         )
+        return
+
+    if data == "safe:home":
+        await send_home(chat_id, lang, context)
         return
 
     if data == "safe:shop":
@@ -580,8 +816,27 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(t(lang, "shop_title"), reply_markup=kb_shop_items(lang, items), parse_mode="Markdown")
         return
 
-    if data == "safe:home":
-        await send_home(chat_id, lang, context)
+    if data == "safe:buy":
+        # operator online check
+        online = await get_setting(pool, "operator_online", "true")
+        if online != "true":
+            await query.edit_message_text(t(lang, "buy_offline"), reply_markup=kb_safe_menu(lang))
+            return
+
+        items = await list_items(pool)
+        cart = get_cart(context)
+        subtotal = await recompute_subtotal(pool, cart)
+        context.user_data["buy"]["subtotal_cents"] = subtotal
+
+        text = f"{t(lang,'buy_intro')}\n\n{t(lang,'buy_cart')}: {cents_to_eur_str(subtotal)}"
+        kb = kb_buy_menu(lang, items, cart, subtotal)
+
+        # show on current message (text) OR send new if photo message
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
         return
 
 async def item_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -614,7 +869,9 @@ async def item_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(t(lang, "admin_bad"), reply_markup=kb_safe_menu(lang))
         return
 
-    caption = f"🖤 *{item['name']}*\n\n{item['short_text']}"
+    # ✅ removed black heart emoji (requested)
+    price = cents_to_eur_str(int(item["price_cents"]))
+    caption = f"*{item['name']}*\n{price}\n\n{item['short_text']}"
     await context.bot.send_photo(
         chat_id=query.message.chat_id,
         photo=item["photo_file_id"],
@@ -623,6 +880,206 @@ async def item_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
     )
 
+# ========= BUY CALLBACKS =========
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    user = update.effective_user
+    if not user:
+        return
+
+    db_user = await get_user(pool, user.id)
+    lang = (db_user["language"] if db_user and db_user["language"] else "et")
+    status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+    if status != "SAFE":
+        await query.edit_message_text(t(lang, "do_start"), reply_markup=kb_languages())
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+
+    # operator online check for any buy action
+    online = await get_setting(pool, "operator_online", "true")
+    if online != "true":
+        await query.edit_message_text(t(lang, "buy_offline"), reply_markup=kb_safe_menu(lang))
+        return
+
+    cart = get_cart(context)
+
+    # buy:clear
+    if data == "buy:clear":
+        context.user_data["buy"] = {"cart": {}, "subtotal_cents": 0}
+        items = await list_items(pool)
+        text = f"{t(lang,'buy_intro')}\n\n{t(lang,'buy_cart')}: {cents_to_eur_str(0)}"
+        kb = kb_buy_menu(lang, items, {}, 0)
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # buy:back -> return to buy menu
+    if data == "buy:back":
+        items = await list_items(pool)
+        subtotal = await recompute_subtotal(pool, cart)
+        context.user_data["buy"]["subtotal_cents"] = subtotal
+        text = f"{t(lang,'buy_intro')}\n\n{t(lang,'buy_cart')}: {cents_to_eur_str(subtotal)}"
+        kb = kb_buy_menu(lang, items, cart, subtotal)
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # buy:item:<id> -> ask qty
+    if len(parts) == 3 and parts[1] == "item":
+        try:
+            item_id = int(parts[2])
+        except Exception:
+            return
+        item = await get_item(pool, item_id)
+        if not item:
+            return
+        price = cents_to_eur_str(int(item["price_cents"]))
+        text = f"*{item['name']}*\n{price}\n\n{t(lang,'buy_choose_qty')}"
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb_qty(lang, item_id), parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb_qty(lang, item_id), parse_mode="Markdown")
+        return
+
+    # buy:qty:<id>:<q>
+    if len(parts) == 4 and parts[1] == "qty":
+        try:
+            item_id = int(parts[2])
+            qty = int(parts[3])
+        except Exception:
+            return
+        if qty <= 0:
+            cart.pop(item_id, None)
+        else:
+            cart[item_id] = qty
+        context.user_data["buy"]["cart"] = cart
+
+        items = await list_items(pool)
+        subtotal = await recompute_subtotal(pool, cart)
+        context.user_data["buy"]["subtotal_cents"] = subtotal
+
+        text = f"{t(lang,'buy_intro')}\n\n{t(lang,'buy_cart')}: {cents_to_eur_str(subtotal)}"
+        kb = kb_buy_menu(lang, items, cart, subtotal)
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # buy:next -> delivery question
+    if data == "buy:next":
+        subtotal = await recompute_subtotal(pool, cart)
+        context.user_data["buy"]["subtotal_cents"] = subtotal
+        if subtotal <= 0 or not cart:
+            is_photo = bool(query.message and getattr(query.message, "photo", None))
+            if is_photo:
+                await query.edit_message_caption(caption=t(lang, "buy_need_items"), reply_markup=kb_delivery(lang))
+            else:
+                await query.edit_message_text(t(lang, "buy_need_items"), reply_markup=kb_delivery(lang))
+            return
+
+        text = t(lang, "buy_delivery_q") + f"\n\n{t(lang,'buy_cart')}: {cents_to_eur_str(subtotal)}"
+        is_photo = bool(query.message and getattr(query.message, "photo", None))
+        if is_photo:
+            await query.edit_message_caption(caption=text, reply_markup=kb_delivery(lang), parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text, reply_markup=kb_delivery(lang), parse_mode="Markdown")
+        return
+
+    # buy:delivery:yes/no
+    if len(parts) == 3 and parts[1] == "delivery":
+        choice = parts[2]
+        subtotal = await recompute_subtotal(pool, cart)
+        context.user_data["buy"]["subtotal_cents"] = subtotal
+
+        if choice == "yes":
+            context.user_data["buy"]["delivery"] = True
+            await set_state(pool, user.id, "BUY_ADDRESS")
+            # ask address (use normal message to user)
+            await context.bot.send_message(chat_id=query.message.chat_id, text=t(lang, "buy_send_address"), reply_markup=kb_languages())
+            return
+
+        if choice == "no":
+            context.user_data["buy"]["delivery"] = False
+            # finalize order without address
+            total = subtotal
+            order_id = await create_order(pool, user.id, cart, subtotal, False, None, total)
+            context.user_data.pop("buy", None)
+
+            await context.bot.send_message(chat_id=user.id, text=t(lang, "buy_order_sent"))
+
+            await notify_admin_order(pool, context, order_id)
+            return
+
+# ========= ORDER -> ADMIN =========
+async def notify_admin_order(pool: asyncpg.Pool, context: ContextTypes.DEFAULT_TYPE, order_id: int) -> None:
+    order = await get_order(pool, order_id)
+    if not order:
+        return
+
+    user_id = int(order["user_id"])
+    u = await get_user(pool, user_id)
+    uname = f"@{u['username']}" if u and u.get("username") else "(no username)"
+    name = ((u.get("first_name") or "") + " " + (u.get("last_name") or "")).strip() if u else "(no name)"
+
+    cart = order["cart_json"]
+    if isinstance(cart, str):
+        try:
+            cart = json.loads(cart)
+        except Exception:
+            cart = {}
+
+    items = await list_items(pool)
+    item_map = {int(it["id"]): it for it in items}
+
+    lines = []
+    for k, v in (cart or {}).items():
+        try:
+            iid = int(k)
+            qty = int(v)
+        except Exception:
+            continue
+        it = item_map.get(iid)
+        if not it:
+            continue
+        price = cents_to_eur_str(int(it["price_cents"]))
+        lines.append(f"- {it['name']} x{qty} ({price})")
+
+    delivery = bool(order["delivery"])
+    addr = order["address"] or "-"
+    subtotal = cents_to_eur_str(int(order["subtotal_cents"]))
+    total = cents_to_eur_str(int(order["total_cents"]))
+
+    msg = (
+        "NEW ORDER\n\n"
+        f"Order ID: {order_id}\n"
+        f"User ID: {user_id}\n"
+        f"Name: {name}\n"
+        f"Username: {uname}\n\n"
+        "Items:\n" + ("\n".join(lines) if lines else "- (empty)") + "\n\n"
+        f"Subtotal: {subtotal}\n"
+        f"Delivery: {'YES' if delivery else 'NO'}\n"
+        f"Address: {addr}\n"
+        f"TOTAL: {total}\n"
+    )
+    await context.bot.send_message(chat_id=ADMIN_ID_INT, text=msg)
+
+# ========= TEXT HANDLER =========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -640,6 +1097,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state = db_user["state"] if db_user else None
     text = update.message.text.strip()
 
+    # ---- ADMIN additem flow ----
     addflow: Optional[Dict[str, Any]] = context.user_data.get("additem")
     if addflow and is_admin(user.id):
         step = addflow.get("step")
@@ -651,15 +1109,54 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if step == "TEXT":
             addflow["short_text"] = text
+            addflow["step"] = "PRICE"
+            context.user_data["additem"] = addflow
+            await update.message.reply_text(t(lang, "admin_add_price"))
+            return
+        if step == "PRICE":
+            try:
+                price = float(text.replace(",", "."))
+                if price < 0:
+                    raise ValueError()
+                addflow["price_cents"] = eur_to_cents(price)
+            except Exception:
+                await update.message.reply_text(t(lang, "admin_add_price"))
+                return
             addflow["step"] = "PHOTO"
             context.user_data["additem"] = addflow
             await update.message.reply_text(t(lang, "admin_add_photo"))
             return
 
-    if status == "SAFE":
-        await send_home(chat.id, lang, context)
+    # ---- BUY ADDRESS ----
+    if state == "BUY_ADDRESS" and status == "SAFE":
+        buy = context.user_data.get("buy") or {}
+        cart = buy.get("cart") if isinstance(buy, dict) else {}
+        if not isinstance(cart, dict) or not cart:
+            await set_state(pool, user.id, None)
+            context.user_data.pop("buy", None)
+            await update.message.reply_text(t(lang, "buy_need_items"))
+            return
+
+        cart2: Dict[int, int] = {}
+        for k, v in cart.items():
+            try:
+                cart2[int(k)] = int(v)
+            except Exception:
+                pass
+
+        subtotal = await recompute_subtotal(pool, cart2)
+        total = subtotal + DELIVERY_FEE_CENTS
+        address = text
+
+        order_id = await create_order(pool, user.id, cart2, subtotal, True, address, total)
+        await set_state(pool, user.id, None)
+        context.user_data.pop("buy", None)
+
+        await update.message.reply_text(t(lang, "buy_order_sent"))
+        await notify_admin_order(pool, context, order_id)
         return
 
+    # ---- CLAIM referral ----
     if status == "PENDING":
         await update.message.reply_text(t(lang, "already_pending"), reply_markup=kb_languages())
         return
@@ -690,11 +1187,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"Claim ID: {claim_id}\n"
         )
 
-        await context.bot.send_message(chat_id=ADMIN_ID_INT, text=admin_text, reply_markup=kb_admin_decision(claim_id))
+        await context.bot.send_message(
+            chat_id=ADMIN_ID_INT,
+            text=admin_text,
+            reply_markup=kb_admin_decision(claim_id),
+        )
+        return
+
+    # SAFE typing -> show home
+    if status == "SAFE":
+        await send_home(chat.id, lang, context)
         return
 
     await update.message.reply_text(t(lang, "do_start"), reply_markup=kb_languages())
 
+# ========= PHOTO HANDLER (admin additem photo step) =========
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.photo:
         return
@@ -713,6 +1220,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     name = (addflow.get("name") or "").strip()
     short_text = (addflow.get("short_text") or "").strip()
+    price_cents = int(addflow.get("price_cents") or 0)
+
     if not name or not short_text:
         reset_additem(context)
         await update.message.reply_text(t(lang, "admin_bad"))
@@ -721,7 +1230,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     file_id = update.message.photo[-1].file_id
 
     try:
-        await add_item(pool, name=name, short_text=short_text, photo_file_id=file_id)
+        await add_item(pool, name=name, short_text=short_text, price_cents=price_cents, photo_file_id=file_id)
     except Exception:
         reset_additem(context)
         await update.message.reply_text(t(lang, "admin_bad"))
@@ -868,6 +1377,21 @@ async def admin_remove_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text("✅ Removed from SAFE list.")
 
+# ========= ADMIN COMMANDS (ONLINE/OFFLINE) =========
+async def admin_online(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not is_admin(update.effective_user.id) or not update.message:
+        return
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    await set_setting(pool, "operator_online", "true")
+    await update.message.reply_text("✅ ONLINE")
+
+async def admin_offline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not is_admin(update.effective_user.id) or not update.message:
+        return
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    await set_setting(pool, "operator_online", "false")
+    await update.message.reply_text("❌ OFFLINE")
+
 # ========= ADMIN COMMANDS (SHOP) =========
 async def admin_additem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -917,6 +1441,31 @@ async def admin_removeitem_callback(update: Update, context: ContextTypes.DEFAUL
     await remove_item(pool, item_id)
     await query.edit_message_text("✅ Removed.")
 
+# ========= ADMIN /loc (send pickup location + time) =========
+async def admin_loc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not is_admin(update.effective_user.id) or not update.message:
+        return
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit():
+        await update.message.reply_text("Usage: /loc <order_id> <asukoht ja kellaaeg>")
+        return
+
+    order_id = int(args[0])
+    info = " ".join(args[1:]).strip()
+    order = await get_order(pool, order_id)
+    if not order:
+        await update.message.reply_text("Order not found.")
+        return
+
+    user_id = int(order["user_id"])
+    u = await get_user(pool, user_id)
+    lang = (u["language"] if u and u.get("language") else "et")
+
+    await context.bot.send_message(chat_id=user_id, text=f"{t(lang,'order_pickup_msg')}\n{info}")
+    await update.message.reply_text("✅ Sent.")
+
 # ========= MAIN =========
 def main() -> None:
     app = (
@@ -929,12 +1478,13 @@ def main() -> None:
 
     # user
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # admin safe
+    # admin safe + operator
     app.add_handler(CommandHandler("add", admin_add_safe))
     app.add_handler(CommandHandler("remove", admin_remove_safe))
+    app.add_handler(CommandHandler("online", admin_online))
+    app.add_handler(CommandHandler("offline", admin_offline))
+    app.add_handler(CommandHandler("loc", admin_loc))
 
     # admin shop
     app.add_handler(CommandHandler("additem", admin_additem))
@@ -945,10 +1495,17 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(shop|buy|help|account|home)$"))
     app.add_handler(CallbackQueryHandler(item_open, pattern=r"^item:\d+$"))
 
+    # buy callbacks
+    app.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:"))
+
     # admin callbacks
     app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^adm:(acc|dec):\d+$"))
     app.add_handler(CallbackQueryHandler(admin_remove_safe_callback, pattern=r"^adm:rem:\d+$"))
     app.add_handler(CallbackQueryHandler(admin_removeitem_callback, pattern=r"^adm:rmitem:\d+$"))
+
+    # messages
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
