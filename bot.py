@@ -1,7 +1,7 @@
 import os
 import asyncpg
-from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -22,12 +22,16 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 """
 
+# 1 nupp klaviatuuril
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton("Proovi")]],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
+
 async def on_startup(app: Application) -> None:
-    # Loo connection pool ja salvesta bot_data sisse
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     app.bot_data["db_pool"] = pool
-
-    # Tee tabel kui puudub
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLE_SQL)
 
@@ -35,6 +39,12 @@ async def on_shutdown(app: Application) -> None:
     pool = app.bot_data.get("db_pool")
     if pool:
         await pool.close()
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Vali menüüst nupp 👇",
+        reply_markup=MENU_KEYBOARD
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
@@ -54,19 +64,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id, user_id, username, text
         )
 
-    # Test vastus
-    await update.message.reply_text("✅ Test: bot töötab!")
+    # Kui vajutati nuppu
+    if text == "Proovi":
+        await update.message.reply_text("✅ Proovi nupp töötab!", reply_markup=MENU_KEYBOARD)
+        return
+
+    # Muu tekst
+    await update.message.reply_text("Kirjuta /start et näha menüüd.", reply_markup=MENU_KEYBOARD)
 
 def main() -> None:
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_init(on_startup)      # käivitub enne pollingut
-        .post_shutdown(on_shutdown) # sulgeb pooli korralikult
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
         .build()
     )
 
+    app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
