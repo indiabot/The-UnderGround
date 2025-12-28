@@ -72,6 +72,10 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "already_safe": "Sa oled SAFE nimekirjas ✅",
         "accepted": "✅ Admin kinnitas su verifitseerimise. Sa oled nüüd SAFE.",
         "declined": "❌ Admin lükkas su verifitseerimise tagasi.",
+        "removed_safe": "⚠️ Admin eemaldas sind SAFE listist. Palun tee verifitseerimine uuesti /start kaudu.",
+        "admin_removed_ok": "✅ Eemaldatud SAFE listist.",
+        "admin_not_allowed": "Pole õigust.",
+        "admin_remove_usage": "Kasuta: /remove <user_id>",
     },
     "ru": {
         "welcome": "Привет! Выбери язык и нажми Verify 👇",
@@ -83,6 +87,10 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "already_safe": "Ты в SAFE списке ✅",
         "accepted": "✅ Админ подтвердил проверку. Ты теперь SAFE.",
         "declined": "❌ Админ отклонил проверку.",
+        "removed_safe": "⚠️ Админ удалил тебя из SAFE списка. Пожалуйста, пройди проверку заново через /start.",
+        "admin_removed_ok": "✅ Удалено из SAFE списка.",
+        "admin_not_allowed": "Нет доступа.",
+        "admin_remove_usage": "Используй: /remove <user_id>",
     },
     "en": {
         "welcome": "Hi! Choose a language and press Verify 👇",
@@ -94,6 +102,10 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "already_safe": "You are on the SAFE list ✅",
         "accepted": "✅ Admin approved you. You are SAFE now.",
         "declined": "❌ Admin declined your verification.",
+        "removed_safe": "⚠️ Admin removed you from the SAFE list. Please verify again via /start.",
+        "admin_removed_ok": "✅ Removed from SAFE list.",
+        "admin_not_allowed": "Not allowed.",
+        "admin_remove_usage": "Use: /remove <user_id>",
     },
 }
 
@@ -114,12 +126,25 @@ def kb_language_and_verify(lang: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(t(lang, "verify"), callback_data="verify")],
     ])
 
+def kb_language_only(lang: str) -> InlineKeyboardMarkup:
+    # Keele vahetus ka SAFE/PENDING puhul
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇪🇪 Eesti", callback_data="lang:et"),
+        InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+        InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
+    ]])
+
 def kb_admin_decision(claim_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Accept", callback_data=f"adm:acc:{claim_id}"),
             InlineKeyboardButton("❌ Decline", callback_data=f"adm:dec:{claim_id}"),
         ]
+    ])
+
+def kb_admin_remove(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Remove from SAFE", callback_data=f"adm:rem:{user_id}")]
     ])
 
 # ------------------ DB helpers ------------------
@@ -198,7 +223,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat:
+    if not user or not chat or not update.message:
         return
 
     await upsert_user(pool, user)
@@ -207,14 +232,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status = (db_user["status"] if db_user else "NEW") or "NEW"
 
     if status == "SAFE":
-        await update.message.reply_text(t(lang, "already_safe"))
+        await update.message.reply_text(t(lang, "already_safe"), reply_markup=kb_language_only(lang))
         return
 
     if status == "PENDING":
-        await update.message.reply_text(t(lang, "already_pending"))
+        await update.message.reply_text(t(lang, "already_pending"), reply_markup=kb_language_only(lang))
         return
 
-    # claim.png läheb kasutajale alguses
+    # claim.png läheb kasutajale alguses (NEW/DECLINED)
     try:
         with open(CLAIM_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
@@ -246,31 +271,54 @@ async def on_language_or_verify(update: Update, context: ContextTypes.DEFAULT_TY
     status = (db_user["status"] if db_user else "NEW") or "NEW"
     data = query.data or ""
 
-    # Language
+    # Language change works always
     if data.startswith("lang:"):
         new_lang = data.split(":", 1)[1]
         if new_lang not in ("et", "ru", "en"):
             new_lang = "et"
         await set_language(pool, user.id, new_lang)
 
-        # Uuenda sama sõnumit (teksti) – pilt jääb samaks
-        await query.edit_message_caption(
-            caption=t(new_lang, "welcome"),
-            reply_markup=kb_language_and_verify(new_lang),
-        )
+        # Uuenda sama message'i (caption või text)
+        # Kui see message on photo message, on caption olemas; muidu text.
+        if query.message and getattr(query.message, "photo", None):
+            # Photo + caption
+            if status in ("SAFE", "PENDING"):
+                # SAFE/PENDING puhul ei näita Verify nuppu
+                await query.edit_message_caption(
+                    caption=t(new_lang, "already_safe") if status == "SAFE" else t(new_lang, "already_pending"),
+                    reply_markup=kb_language_only(new_lang),
+                )
+            else:
+                await query.edit_message_caption(
+                    caption=t(new_lang, "welcome"),
+                    reply_markup=kb_language_and_verify(new_lang),
+                )
+        else:
+            # Text message
+            if status == "SAFE":
+                await query.edit_message_text(t(new_lang, "already_safe"), reply_markup=kb_language_only(new_lang))
+            elif status == "PENDING":
+                await query.edit_message_text(t(new_lang, "already_pending"), reply_markup=kb_language_only(new_lang))
+            else:
+                await query.edit_message_text(t(new_lang, "welcome"), reply_markup=kb_language_and_verify(new_lang))
         return
 
-    # Verify
+    # Verify pressed (only if not SAFE/PENDING)
     if data == "verify":
         if status == "SAFE":
-            await query.edit_message_caption(caption=t(lang, "already_safe"))
+            await query.edit_message_text(t(lang, "already_safe"), reply_markup=kb_language_only(lang))
             return
         if status == "PENDING":
-            await query.edit_message_caption(caption=t(lang, "already_pending"))
+            await query.edit_message_text(t(lang, "already_pending"), reply_markup=kb_language_only(lang))
             return
 
         await set_state(pool, user.id, "WAITING_REF")
-        await query.edit_message_caption(caption=t(lang, "waiting_ref"))
+
+        # Kui tegu oli fotoga, muuda captionit, muidu texti
+        if query.message and getattr(query.message, "photo", None):
+            await query.edit_message_caption(caption=t(lang, "waiting_ref"))
+        else:
+            await query.edit_message_text(t(lang, "waiting_ref"))
         return
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -291,11 +339,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text.strip()
 
     if status == "SAFE":
-        await update.message.reply_text(t(lang, "already_safe"))
+        await update.message.reply_text(t(lang, "already_safe"), reply_markup=kb_language_only(lang))
         return
 
     if status == "PENDING":
-        await update.message.reply_text(t(lang, "already_pending"))
+        await update.message.reply_text(t(lang, "already_pending"), reply_markup=kb_language_only(lang))
         return
 
     # Ootame referral @username
@@ -310,9 +358,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await set_state(pool, user.id, None)
         await set_status(pool, user.id, "PENDING")
 
-        await update.message.reply_text(t(lang, "wait_admin"))
+        await update.message.reply_text(t(lang, "wait_admin"), reply_markup=kb_language_only(lang))
 
-        # Adminile ainult tekst + nupud (ilma pildita)
+        # Adminile ainult tekst + Accept/Decline
         now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
         uname = f"@{user.username}" if user.username else "(no username)"
@@ -335,10 +383,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # default
-    await update.message.reply_text(
-        t(lang, "welcome"),
-        reply_markup=kb_language_and_verify(lang),
-    )
+    await update.message.reply_text(t(lang, "welcome"), reply_markup=kb_language_and_verify(lang))
 
 async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -346,7 +391,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await query.answer()
 
-    # Only admin
     if not update.effective_user or update.effective_user.id != ADMIN_ID_INT:
         await query.edit_message_text("Not allowed.")
         return
@@ -376,21 +420,93 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     target_user = await get_user(pool, target_user_id)
     target_lang = (target_user["language"] if target_user else "et") or "et"
 
+    base_text = query.message.text or ""
+
     if action == "acc":
         await decide_claim(pool, claim_id, "ACCEPTED")
         await set_status(pool, target_user_id, "SAFE")
         await context.bot.send_message(chat_id=target_user_id, text=t(target_lang, "accepted"))
-        await query.edit_message_text((query.message.text or "") + "\n✅ DECISION: ACCEPTED")
+
+        # Uuenda admini sõnum + lisa Remove nupp
+        await query.edit_message_text(
+            base_text + "\n✅ DECISION: ACCEPTED\n\n(You can remove later)",
+            reply_markup=kb_admin_remove(target_user_id),
+        )
         return
 
     if action == "dec":
         await decide_claim(pool, claim_id, "DECLINED")
         await set_status(pool, target_user_id, "DECLINED")
         await context.bot.send_message(chat_id=target_user_id, text=t(target_lang, "declined"))
-        await query.edit_message_text((query.message.text or "") + "\n❌ DECISION: DECLINED")
+
+        await query.edit_message_text(base_text + "\n❌ DECISION: DECLINED")
         return
 
     await query.edit_message_text("Unknown action.")
+
+async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if not update.effective_user or update.effective_user.id != ADMIN_ID_INT:
+        await query.edit_message_text("Not allowed.")
+        return
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    data = query.data or ""  # adm:rem:<user_id>
+    parts = data.split(":")
+    if len(parts) != 3:
+        await query.edit_message_text("Bad callback.")
+        return
+
+    user_id = int(parts[2])
+
+    target_user = await get_user(pool, user_id)
+    target_lang = (target_user["language"] if target_user else "et") or "et"
+
+    # eemaldame SAFE listist -> NEW (ja state null)
+    await set_status(pool, user_id, "NEW")
+    await set_state(pool, user_id, None)
+
+    # teavita kasutajat
+    try:
+        await context.bot.send_message(chat_id=user_id, text=t(target_lang, "removed_safe"))
+    except Exception:
+        # kui user blokkis boti vms
+        pass
+
+    await query.edit_message_text((query.message.text or "") + "\n🗑 Removed from SAFE.")
+
+async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # /remove <user_id>
+    if not update.effective_user or update.effective_user.id != ADMIN_ID_INT:
+        # admini tekstid on tal endal, aga lihtsuse mõttes:
+        return
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    if not update.message:
+        return
+
+    args = context.args or []
+    if len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text("Usage: /remove <user_id>")
+        return
+
+    user_id = int(args[0])
+    target_user = await get_user(pool, user_id)
+    target_lang = (target_user["language"] if target_user else "et") or "et"
+
+    await set_status(pool, user_id, "NEW")
+    await set_state(pool, user_id, None)
+
+    try:
+        await context.bot.send_message(chat_id=user_id, text=t(target_lang, "removed_safe"))
+    except Exception:
+        pass
+
+    await update.message.reply_text("✅ Removed from SAFE list.")
 
 def main() -> None:
     app = (
@@ -402,8 +518,12 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("remove", admin_remove_command))
+
     app.add_handler(CallbackQueryHandler(on_language_or_verify, pattern=r"^(lang:|verify)$"))
     app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^adm:(acc|dec):\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_remove_callback, pattern=r"^adm:rem:\d+$"))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
