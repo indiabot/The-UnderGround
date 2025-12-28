@@ -32,7 +32,7 @@ if not ADMIN_ID or not ADMIN_ID.isdigit():
 ADMIN_ID_INT = int(ADMIN_ID)
 CLAIM_IMAGE_PATH = "claim.png"
 
-# ------------------ DB schema (robust) ------------------
+# ------------------ DB schema ------------------
 
 CREATE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 """
 
-# If you had older users table without these columns, this keeps it working:
 ALTER_USERS_SQL = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'et';",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'NEW';",
@@ -81,12 +80,18 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "invalid_ref": "Palun kirjuta korrektne @username (peab algama @-ga). Proovi uuesti.",
         "wait_admin": "Aitäh! Oota palun admini vastust. ⏳",
         "already_pending": "Su verifitseerimine on juba ootel. Oota admini vastust. ⏳",
-        "already_safe": "Sa oled SAFE nimekirjas ✅ Tee /start",
         "accepted": "✅ Admin kinnitas su verifitseerimise. Sa oled nüüd SAFE. Tee /start",
         "declined": "❌ Admin lükkas su verifitseerimise tagasi.",
         "removed_safe": "⚠️ Admin eemaldas sind SAFE listist. Palun tee verifitseerimine uuesti /start kaudu.",
         "added_safe": "✅ Admin lisas sind SAFE listi. Tee /start",
         "do_start": "Tee /start",
+
+        # SAFE menu text
+        "safe_welcome": (
+            "👋 Tere tulemast *The UnderGround Market*\n\n"
+            "Siin saad vaadata pakkumisi, teha oste ja hallata oma kontot.\n"
+            "Vali alt menüüst üks valik 👇"
+        ),
     },
     "ru": {
         "welcome": "Привет! Нажми Verify 👇",
@@ -95,12 +100,17 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "invalid_ref": "Пожалуйста, напиши корректный @username (должен начинаться с @). Попробуй ещё раз.",
         "wait_admin": "Спасибо! Пожалуйста, дождись решения админа. ⏳",
         "already_pending": "Твоя проверка уже ожидает решения. ⏳",
-        "already_safe": "Ты в SAFE списке ✅ Напиши /start",
         "accepted": "✅ Админ подтвердил проверку. Ты теперь SAFE. Напиши /start",
         "declined": "❌ Админ отклонил проверку.",
         "removed_safe": "⚠️ Админ удалил тебя из SAFE списка. Пройди проверку заново через /start.",
         "added_safe": "✅ Админ добавил тебя в SAFE список. Напиши /start",
         "do_start": "Напиши /start",
+
+        "safe_welcome": (
+            "👋 Добро пожаловать в *The UnderGround Market*\n\n"
+            "Здесь ты можешь смотреть предложения, покупать и управлять аккаунтом.\n"
+            "Выбери пункт меню ниже 👇"
+        ),
     },
     "en": {
         "welcome": "Hi! Press Verify 👇",
@@ -109,12 +119,17 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "invalid_ref": "Please send a valid @username (must start with @). Try again.",
         "wait_admin": "Thanks! Please wait for admin approval. ⏳",
         "already_pending": "Your verification is already pending. ⏳",
-        "already_safe": "You are on the SAFE list ✅ Send /start",
         "accepted": "✅ Admin approved you. You are SAFE now. Send /start",
         "declined": "❌ Admin declined your verification.",
         "removed_safe": "⚠️ Admin removed you from the SAFE list. Please verify again via /start.",
         "added_safe": "✅ Admin added you to the SAFE list. Send /start",
         "do_start": "Send /start",
+
+        "safe_welcome": (
+            "👋 Welcome to *The UnderGround Market*\n\n"
+            "Here you can browse offers, buy items, and manage your account.\n"
+            "Choose an option below 👇"
+        ),
     },
 }
 
@@ -140,6 +155,24 @@ def kb_languages_and_verify(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
         ],
         [InlineKeyboardButton(t(lang, "verify"), callback_data="verify")],
+    ])
+
+def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
+    # Shop / Buy / Help / Account + keeled all eraldi real
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🛍 Shop", callback_data="safe:shop"),
+            InlineKeyboardButton("💳 Buy", callback_data="safe:buy"),
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="safe:help"),
+            InlineKeyboardButton("👤 Account", callback_data="safe:account"),
+        ],
+        [
+            InlineKeyboardButton("🇪🇪 Eesti", callback_data="lang:et"),
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
+        ],
     ])
 
 def kb_admin_decision(claim_id: int) -> InlineKeyboardMarkup:
@@ -221,21 +254,16 @@ async def on_shutdown(app: Application) -> None:
     if pool:
         await pool.close()
 
-# ------------------ UI helper ------------------
+# ------------------ handler helpers ------------------
 
-async def send_or_edit_prompt(query, update_message, text: str, markup: InlineKeyboardMarkup, is_photo: bool) -> None:
-    """
-    - If callback came from photo message -> edit caption
-    - else -> edit text
-    - For normal /start -> send photo (caption) if possible
-    """
+async def edit_or_send(query, message, text: str, reply_markup: InlineKeyboardMarkup, is_photo: bool) -> None:
     if query:
         if is_photo:
-            await query.edit_message_caption(caption=text, reply_markup=markup)
+            await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="Markdown")
         else:
-            await query.edit_message_text(text, reply_markup=markup)
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
-        await update_message.reply_text(text, reply_markup=markup)
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 # ------------------ handlers ------------------
 
@@ -251,15 +279,21 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = (db_user["language"] if db_user and db_user["language"] else "et")
     status = (db_user["status"] if db_user and db_user["status"] else "NEW")
 
+    # SAFE -> show market menu
     if status == "SAFE":
-        await update.message.reply_text(t(lang, "already_safe"), reply_markup=kb_languages())
+        await update.message.reply_text(
+            t(lang, "safe_welcome"),
+            reply_markup=kb_safe_menu(lang),
+            parse_mode="Markdown",
+        )
         return
 
+    # PENDING -> wait
     if status == "PENDING":
         await update.message.reply_text(t(lang, "already_pending"), reply_markup=kb_languages())
         return
 
-    # NEW / DECLINED
+    # NEW / DECLINED -> show claim.png + verify
     try:
         with open(CLAIM_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
@@ -286,47 +320,83 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     db_user = await get_user(pool, user.id)
     lang = (db_user["language"] if db_user and db_user["language"] else "et")
     status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+    state = db_user["state"] if db_user else None
 
     data = query.data or ""
     is_photo = bool(query.message and getattr(query.message, "photo", None))
 
-    # language change (WORKS)
+    # language change
     if data.startswith("lang:"):
         new_lang = data.split(":", 1)[1]
         if new_lang not in ("et", "ru", "en"):
             new_lang = "et"
         await set_language(pool, user.id, new_lang)
 
-        # refresh based on status/state
+        # reload
         db_user2 = await get_user(pool, user.id)
-        state = db_user2["state"] if db_user2 else None
-        status2 = db_user2["status"] if db_user2 else "NEW"
+        status2 = (db_user2["status"] if db_user2 else "NEW")
+        state2 = (db_user2["state"] if db_user2 else None)
 
         if status2 == "SAFE":
-            await send_or_edit_prompt(query, None, t(new_lang, "already_safe"), kb_languages(), is_photo)
+            await edit_or_send(query, None, t(new_lang, "safe_welcome"), kb_safe_menu(new_lang), is_photo=False)
             return
         if status2 == "PENDING":
-            await send_or_edit_prompt(query, None, t(new_lang, "already_pending"), kb_languages(), is_photo)
+            await edit_or_send(query, None, t(new_lang, "already_pending"), kb_languages(), is_photo=is_photo)
             return
-        if state == "WAITING_REF":
-            await send_or_edit_prompt(query, None, t(new_lang, "waiting_ref"), kb_languages(), is_photo)
+        if state2 == "WAITING_REF":
+            await edit_or_send(query, None, t(new_lang, "waiting_ref"), kb_languages(), is_photo=is_photo)
             return
 
-        await send_or_edit_prompt(query, None, t(new_lang, "welcome"), kb_languages_and_verify(new_lang), is_photo)
+        await edit_or_send(query, None, t(new_lang, "welcome"), kb_languages_and_verify(new_lang), is_photo=is_photo)
         return
 
     # verify pressed
     if data == "verify":
         if status == "SAFE":
-            await send_or_edit_prompt(query, None, t(lang, "already_safe"), kb_languages(), is_photo)
+            await edit_or_send(query, None, t(lang, "safe_welcome"), kb_safe_menu(lang), is_photo=False)
             return
         if status == "PENDING":
-            await send_or_edit_prompt(query, None, t(lang, "already_pending"), kb_languages(), is_photo)
+            await edit_or_send(query, None, t(lang, "already_pending"), kb_languages(), is_photo=is_photo)
             return
 
         await set_state(pool, user.id, "WAITING_REF")
-        await send_or_edit_prompt(query, None, t(lang, "waiting_ref"), kb_languages(), is_photo)
+        await edit_or_send(query, None, t(lang, "waiting_ref"), kb_languages(), is_photo=is_photo)
         return
+
+async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    user = update.effective_user
+    if not user:
+        return
+
+    db_user = await get_user(pool, user.id)
+    lang = (db_user["language"] if db_user and db_user["language"] else "et")
+    status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+    if status != "SAFE":
+        # if not safe, bounce
+        await query.edit_message_text(t(lang, "do_start"), reply_markup=kb_languages(), parse_mode="Markdown")
+        return
+
+    data = query.data or ""
+    if data == "safe:shop":
+        await query.edit_message_text("🛍 Shop: coming soon.", reply_markup=kb_safe_menu(lang))
+    elif data == "safe:buy":
+        await query.edit_message_text("💳 Buy: coming soon.", reply_markup=kb_safe_menu(lang))
+    elif data == "safe:help":
+        await query.edit_message_text("❓ Help: kirjutage adminile / contact.", reply_markup=kb_safe_menu(lang))
+    elif data == "safe:account":
+        await query.edit_message_text(
+            f"👤 Account\n\nUser ID: `{user.id}`",
+            reply_markup=kb_safe_menu(lang),
+            parse_mode="Markdown",
+        )
+    else:
+        await query.edit_message_text(t(lang, "safe_welcome"), reply_markup=kb_safe_menu(lang), parse_mode="Markdown")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
@@ -346,7 +416,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text.strip()
 
     if status == "SAFE":
-        await update.message.reply_text(t(lang, "already_safe"), reply_markup=kb_languages())
+        await update.message.reply_text(t(lang, "safe_welcome"), reply_markup=kb_safe_menu(lang), parse_mode="Markdown")
         return
 
     if status == "PENDING":
@@ -366,7 +436,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         await update.message.reply_text(t(lang, "wait_admin"), reply_markup=kb_languages())
 
-        # admin: text + buttons
         now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
         uname = f"@{user.username}" if user.username else "(no username)"
@@ -403,7 +472,7 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
-    data = query.data or ""  # adm:acc:<id> OR adm:dec:<id>
+    data = query.data or ""
     parts = data.split(":")
     if len(parts) != 3:
         await query.edit_message_text("Bad callback.")
@@ -434,7 +503,12 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await set_status(pool, target_user_id, "SAFE")
         await set_state(pool, target_user_id, None)
 
-        await context.bot.send_message(chat_id=target_user_id, text=t(target_lang, "accepted"), reply_markup=kb_languages())
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=t(target_lang, "accepted"),
+            reply_markup=kb_safe_menu(target_lang),
+            parse_mode="Markdown",
+        )
 
         await query.edit_message_text(
             base_text + "\n✅ DECISION: ACCEPTED",
@@ -464,7 +538,7 @@ async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
-    data = query.data or ""  # adm:rem:<user_id>
+    data = query.data or ""
     parts = data.split(":")
     if len(parts) != 3:
         await query.edit_message_text("Bad callback.")
@@ -485,7 +559,7 @@ async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text((query.message.text or "") + "\n🗑 Removed from SAFE.")
 
-# ------------------ admin commands: /add and /remove ------------------
+# ------------------ admin commands ------------------
 
 async def admin_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or update.effective_user.id != ADMIN_ID_INT:
@@ -509,7 +583,12 @@ async def admin_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
 
     try:
-        await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"), reply_markup=kb_languages())
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=t(target_lang, "added_safe"),
+            reply_markup=kb_safe_menu(target_lang),
+            parse_mode="Markdown",
+        )
     except Exception:
         pass
 
@@ -558,12 +637,17 @@ def main() -> None:
     app.add_handler(CommandHandler("add", admin_add_command))
     app.add_handler(CommandHandler("remove", admin_remove_command))
 
-    # ✅ IMPORTANT: pattern must match lang:et etc
+    # language + verify
     app.add_handler(CallbackQueryHandler(on_lang_or_verify, pattern=r"^(lang:(et|ru|en)|verify)$"))
 
+    # safe menu
+    app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(shop|buy|help|account)$"))
+
+    # admin buttons
     app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^adm:(acc|dec):\d+$"))
     app.add_handler(CallbackQueryHandler(admin_remove_callback, pattern=r"^adm:rem:\d+$"))
 
+    # text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
