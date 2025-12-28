@@ -83,7 +83,7 @@ ALTER_USERS_SQL = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();",
 ]
 
-# ========= TEXTS (use black-style emoji: 🖤 ⚫️ ◼️ ✅ ❌ ⏳) =========
+# ========= TEXTS =========
 TEXTS: Dict[str, Dict[str, str]] = {
     "et": {
         "welcome": "🖤 Tere! Vajuta Verify",
@@ -99,22 +99,24 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "do_start": "🖤 Tee /start",
         "safe_welcome": (
             "🖤 *The UnderGround Market*\n\n"
-            "◼️ Siin saad vaadata pakkumisi, teha oste ja hallata oma kontot.\n"
-            "⚫️ Vali alt menüüst üks valik."
+            "Siin saad vaadata pakkumisi, teha oste ja hallata oma kontot.\n"
+            "Vali alt menüüst üks valik."
         ),
-        "shop_title": "🖤 *Shop*\n⚫️ Vali toode.",
+        "shop_title": "🖤 *Shop*\nVali toode.",
         "shop_empty": "🖤 Shop on hetkel tühi.",
         "help_text": "🖤 Help: kirjuta adminile.",
         "account_text": "🖤 Account",
         "buy_soon": "🖤 Buy: tuleb varsti.",
-        "admin_add_name": "🖤 /additem\n◼️ Saada itemi nimi:",
-        "admin_add_text": "◼️ Saada lühike tekst (kirjeldus):",
-        "admin_add_photo": "◼️ Saada nüüd pilt (foto) selle itemi jaoks:",
+        "admin_add_name": "🖤 /additem\nSaada itemi nimi:",
+        "admin_add_text": "Saada lühike tekst (kirjeldus):",
+        "admin_add_photo": "Saada nüüd pilt (foto) selle itemi jaoks:",
         "admin_add_done": "✅ Item lisatud Shopi!",
         "admin_remove_pick": "🖤 Vali item, mida eemaldada:",
         "admin_removed": "✅ Item eemaldatud.",
         "admin_remove_empty": "🖤 Pole midagi eemaldada.",
         "admin_bad": "❌ Midagi läks valesti.",
+        "back": "⬅️ Tagasi",
+        "home": "⬅️ Home",
     },
     "ru": {
         "welcome": "🖤 Привет! Нажми Verify",
@@ -130,22 +132,24 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "do_start": "🖤 Напиши /start",
         "safe_welcome": (
             "🖤 *The UnderGround Market*\n\n"
-            "◼️ Смотри предложения, покупай и управляй аккаунтом.\n"
-            "⚫️ Выбери пункт меню ниже."
+            "Здесь ты можешь смотреть предложения, покупать и управлять аккаунтом.\n"
+            "Выбери пункт меню ниже."
         ),
-        "shop_title": "🖤 *Shop*\n⚫️ Выбери товар.",
+        "shop_title": "🖤 *Shop*\nВыбери товар.",
         "shop_empty": "🖤 Shop сейчас пуст.",
         "help_text": "🖤 Help: напиши админу.",
         "account_text": "🖤 Account",
         "buy_soon": "🖤 Buy: скоро будет.",
-        "admin_add_name": "🖤 /additem\n◼️ Отправь название товара:",
-        "admin_add_text": "◼️ Отправь короткий текст (описание):",
-        "admin_add_photo": "◼️ Теперь отправь фото товара:",
+        "admin_add_name": "🖤 /additem\nОтправь название товара:",
+        "admin_add_text": "Отправь короткий текст (описание):",
+        "admin_add_photo": "Отправь фото товара:",
         "admin_add_done": "✅ Товар добавлен в Shop!",
         "admin_remove_pick": "🖤 Выбери товар для удаления:",
         "admin_removed": "✅ Удалено.",
         "admin_remove_empty": "🖤 Нечего удалять.",
         "admin_bad": "❌ Что-то пошло не так.",
+        "back": "⬅️ Назад",
+        "home": "⬅️ Home",
     },
     "en": {
         "welcome": "🖤 Hi! Press Verify",
@@ -161,22 +165,24 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "do_start": "🖤 Send /start",
         "safe_welcome": (
             "🖤 *The UnderGround Market*\n\n"
-            "◼️ Browse offers, buy items, and manage your account.\n"
-            "⚫️ Choose an option below."
+            "Browse offers, buy items, and manage your account.\n"
+            "Choose an option below."
         ),
-        "shop_title": "🖤 *Shop*\n⚫️ Choose an item.",
+        "shop_title": "🖤 *Shop*\nChoose an item.",
         "shop_empty": "🖤 Shop is empty.",
         "help_text": "🖤 Help: contact admin.",
         "account_text": "🖤 Account",
         "buy_soon": "🖤 Buy: coming soon.",
-        "admin_add_name": "🖤 /additem\n◼️ Send item name:",
-        "admin_add_text": "◼️ Send short text (description):",
-        "admin_add_photo": "◼️ Now send item photo:",
+        "admin_add_name": "🖤 /additem\nSend item name:",
+        "admin_add_text": "Send short text (description):",
+        "admin_add_photo": "Send item photo:",
         "admin_add_done": "✅ Item added to Shop!",
         "admin_remove_pick": "🖤 Pick an item to remove:",
         "admin_removed": "✅ Removed.",
         "admin_remove_empty": "🖤 Nothing to remove.",
         "admin_bad": "❌ Something went wrong.",
+        "back": "⬅️ Back",
+        "home": "⬅️ Home",
     },
 }
 
@@ -188,23 +194,23 @@ def t(lang: str, key: str) -> str:
 # ========= KEYBOARDS =========
 def kb_languages() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⚫️ ET", callback_data="lang:et"),
-        InlineKeyboardButton("⚫️ RU", callback_data="lang:ru"),
-        InlineKeyboardButton("⚫️ EN", callback_data="lang:en"),
+        InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+        InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+        InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
     ]])
 
 def kb_languages_and_verify(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⚫️ ET", callback_data="lang:et"),
-            InlineKeyboardButton("⚫️ RU", callback_data="lang:ru"),
-            InlineKeyboardButton("⚫️ EN", callback_data="lang:en"),
+            InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+            InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+            InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
         ],
         [InlineKeyboardButton("✅ Verify", callback_data="verify")],
     ])
 
 def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
-    # Home button REMOVED as requested (home.png is already "home screen")
+    # Home button removed; home.png is the "home screen"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🖤 Shop", callback_data="safe:shop"),
@@ -215,33 +221,34 @@ def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🖤 Account", callback_data="safe:account"),
         ],
         [
-            InlineKeyboardButton("⚫️ ET", callback_data="lang:et"),
-            InlineKeyboardButton("⚫️ RU", callback_data="lang:ru"),
-            InlineKeyboardButton("⚫️ EN", callback_data="lang:en"),
+            InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+            InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+            InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
         ],
     ])
 
 def kb_shop_items(lang: str, items: List[asyncpg.Record]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for it in items:
-        rows.append([InlineKeyboardButton(f"🖤 {it['name']}", callback_data=f"item:{it['id']}")])
-    # Back to home via callback to send home.png
-    rows.append([InlineKeyboardButton("◼️ Back", callback_data="safe:home")])
+        # remove emoji from item buttons as requested
+        rows.append([InlineKeyboardButton(f"{it['name']}", callback_data=f"item:{it['id']}")])
+    rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])  # back arrow + Home
     rows.append([
-        InlineKeyboardButton("⚫️ ET", callback_data="lang:et"),
-        InlineKeyboardButton("⚫️ RU", callback_data="lang:ru"),
-        InlineKeyboardButton("⚫️ EN", callback_data="lang:en"),
+        InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+        InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+        InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
     ])
     return InlineKeyboardMarkup(rows)
 
 def kb_item_detail(lang: str) -> InlineKeyboardMarkup:
+    # back/home use back arrow emoji
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("◼️ Back", callback_data="safe:shop")],
-        [InlineKeyboardButton("◼️ Home", callback_data="safe:home")],
+        [InlineKeyboardButton(t(lang, "back"), callback_data="safe:shop")],
+        [InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")],
         [
-            InlineKeyboardButton("⚫️ ET", callback_data="lang:et"),
-            InlineKeyboardButton("⚫️ RU", callback_data="lang:ru"),
-            InlineKeyboardButton("⚫️ EN", callback_data="lang:en"),
+            InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
+            InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+            InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
         ],
     ])
 
@@ -344,9 +351,8 @@ def is_admin(uid: Optional[int]) -> bool:
 def reset_additem(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("additem", None)
 
-# ========= USER HANDLERS =========
+# ========= HOME SENDER =========
 async def send_home(chat_id: int, lang: str, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Always send home.png + menu (used as 'home screen')."""
     try:
         with open(HOME_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
@@ -364,6 +370,7 @@ async def send_home(chat_id: int, lang: str, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="Markdown",
         )
 
+# ========= USER HANDLERS =========
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
     user = update.effective_user
@@ -436,9 +443,7 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         return True
             return False
 
-        # SAFE screens
         if status2 == "SAFE":
-            # if shop list screen -> update caption/text + buttons
             if is_shop_list_screen():
                 items = await list_items(pool)
                 if items:
@@ -454,7 +459,6 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     await query.edit_message_text(new_text, reply_markup=new_kb, parse_mode="Markdown")
                 return
 
-            # otherwise update current message to home text/menu
             if is_photo:
                 await query.edit_message_caption(
                     caption=t(new_lang, "safe_welcome"),
@@ -469,7 +473,6 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
             return
 
-        # PENDING
         if status2 == "PENDING":
             if is_photo:
                 await query.edit_message_caption(caption=t(new_lang, "already_pending"), reply_markup=kb_languages())
@@ -477,7 +480,6 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await query.edit_message_text(t(new_lang, "already_pending"), reply_markup=kb_languages())
             return
 
-        # WAITING_REF
         if state2 == "WAITING_REF":
             if is_photo:
                 await query.edit_message_caption(caption=t(new_lang, "waiting_ref"), reply_markup=kb_languages())
@@ -485,7 +487,6 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await query.edit_message_text(t(new_lang, "waiting_ref"), reply_markup=kb_languages())
             return
 
-        # NEW/DECLINED
         if is_photo:
             await query.edit_message_caption(caption=t(new_lang, "welcome"), reply_markup=kb_languages_and_verify(new_lang))
         else:
@@ -544,7 +545,7 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "safe:account":
         await query.edit_message_text(
-            f"{t(lang, 'account_text')}\n\n◼️ User ID: `{user.id}`",
+            f"{t(lang, 'account_text')}\n\nUser ID: `{user.id}`",
             reply_markup=kb_safe_menu(lang),
             parse_mode="Markdown",
         )
@@ -579,7 +580,6 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(t(lang, "shop_title"), reply_markup=kb_shop_items(lang, items), parse_mode="Markdown")
         return
 
-    # "home" action kept as callback target for Back/Home from shop screens
     if data == "safe:home":
         await send_home(chat_id, lang, context)
         return
@@ -614,7 +614,7 @@ async def item_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(t(lang, "admin_bad"), reply_markup=kb_safe_menu(lang))
         return
 
-    caption = f"🖤 *{item['name']}*\n\n◼️ {item['short_text']}"
+    caption = f"🖤 *{item['name']}*\n\n{item['short_text']}"
     await context.bot.send_photo(
         chat_id=query.message.chat_id,
         photo=item["photo_file_id"],
@@ -640,7 +640,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     state = db_user["state"] if db_user else None
     text = update.message.text.strip()
 
-    # admin additem flow (name/text)
     addflow: Optional[Dict[str, Any]] = context.user_data.get("additem")
     if addflow and is_admin(user.id):
         step = addflow.get("step")
@@ -691,11 +690,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"Claim ID: {claim_id}\n"
         )
 
-        await context.bot.send_message(
-            chat_id=ADMIN_ID_INT,
-            text=admin_text,
-            reply_markup=kb_admin_decision(claim_id),
-        )
+        await context.bot.send_message(chat_id=ADMIN_ID_INT, text=admin_text, reply_markup=kb_admin_decision(claim_id))
         return
 
     await update.message.reply_text(t(lang, "do_start"), reply_markup=kb_languages())
@@ -768,7 +763,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     target_user = await get_user(pool, target_user_id)
     target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
-
     base_text = query.message.text or ""
 
     if action == "acc":
@@ -776,9 +770,7 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await set_status(pool, target_user_id, "SAFE")
         await set_state(pool, target_user_id, None)
 
-        # user message WITHOUT menu
         await context.bot.send_message(chat_id=target_user_id, text=t(target_lang, "accepted"))
-
         await query.edit_message_text(base_text + "\n✅ ACCEPTED", reply_markup=kb_admin_remove(target_user_id))
         return
 
@@ -843,7 +835,6 @@ async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     target_user = await get_user(pool, user_id)
     target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
 
-    # user message WITHOUT menu
     try:
         await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"))
     except Exception:
