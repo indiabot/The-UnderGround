@@ -1,7 +1,18 @@
 import os
 import asyncpg
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -9,25 +20,32 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN puudub (Railway Variables -> BOT_TOKEN)")
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL puudub (Railway Postgres plugin)")
+    raise RuntimeError("DATABASE_URL puudub (Railway PostgreSQL plugin)")
 
 CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE IF NOT EXISTS events (
   id SERIAL PRIMARY KEY,
+  event_type TEXT NOT NULL,              -- 'message' või 'button'
   chat_id BIGINT NOT NULL,
   user_id BIGINT,
   username TEXT,
-  text TEXT,
+  payload TEXT,                          -- message text või button callback_data
   created_at TIMESTAMPTZ DEFAULT now()
 );
 """
 
-# 1 nupp klaviatuuril
-MENU_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("Proovi")]],
-    resize_keyboard=True,
-    one_time_keyboard=False
-)
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🧪 Proovi", callback_data="btn_proovi")]]
+    )
+
+async def db_log(app: Application, event_type: str, chat_id: int, user_id, username, payload: str):
+    pool: asyncpg.Pool = app.bot_data["db_pool"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO events (event_type, chat_id, user_id, username, payload) VALUES ($1, $2, $3, $4, $5)",
+            event_type, chat_id, user_id, username, payload
+        )
 
 async def on_startup(app: Application) -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
@@ -41,36 +59,73 @@ async def on_shutdown(app: Application) -> None:
         await pool.close()
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Vali menüüst nupp 👇",
-        reply_markup=MENU_KEYBOARD
+    user = update.effective_user
+    chat = update.effective_chat
+
+    # Logime /start kui "message" (payload: /start)
+    await db_log(
+        context.application,
+        "message",
+        chat.id,
+        user.id if user else None,
+        user.username if user else None,
+        "/start",
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Menüü (nupp on sõnumi all):",
+        reply_markup=main_menu(),
+    )
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
 
+    user = update.effective_user
+    chat = update.effective_chat
     text = update.message.text
-    chat_id = update.message.chat_id
-    user = update.message.from_user
-    user_id = user.id if user else None
-    username = user.username if user else None
 
-    # Salvesta DB-sse
-    pool = context.application.bot_data["db_pool"]
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (chat_id, user_id, username, text) VALUES ($1, $2, $3, $4)",
-            chat_id, user_id, username, text
+    # Salvesta sõnum DB-sse
+    await db_log(
+        context.application,
+        "message",
+        chat.id,
+        user.id if user else None,
+        user.username if user else None,
+        text,
+    )
+
+    # Lihtne test vastus + näita menüüd uuesti
+    await update.message.reply_text(
+        "✅ Test: bot töötab! Vajuta all nuppu 👇",
+        reply_markup=main_menu(),
+    )
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()  # vajalik, et Telegram lõpetaks “loading” animatsiooni
+
+    user = update.effective_user
+    chat = update.effective_chat
+    data = query.data or ""
+
+    # Logi nupuvajutus DB-sse
+    await db_log(
+        context.application,
+        "button",
+        chat.id,
+        user.id if user else None,
+        user.username if user else None,
+        data,
+    )
+
+    if data == "btn_proovi":
+        # Muudame sama sõnumi teksti (edit), et oleks ilus
+        await query.edit_message_text(
+            "✅ Proovi nupp töötab!\n\nKirjuta midagi või vajuta /start, et menüüd uuesti näha."
         )
-
-    # Kui vajutati nuppu
-    if text == "Proovi":
-        await update.message.reply_text("✅ Proovi nupp töötab!", reply_markup=MENU_KEYBOARD)
-        return
-
-    # Muu tekst
-    await update.message.reply_text("Kirjuta /start et näha menüüd.", reply_markup=MENU_KEYBOARD)
+    else:
+        await query.edit_message_text("Tundmatu nupp 🤷")
 
 def main() -> None:
     app = (
@@ -82,7 +137,8 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
