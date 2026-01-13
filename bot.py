@@ -1,8 +1,8 @@
 import os
 import datetime
-import json
+import html
 import asyncpg
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 
 from telegram import (
     Update,
@@ -36,8 +36,7 @@ ADMIN_ID_INT = int(ADMIN_ID)
 CLAIM_IMAGE_PATH = "claim.png"
 HOME_IMAGE_PATH = "home.png"
 
-# ================== MONEY/COUNTERS (generic) ==================
-# We keep "spent" and "completed count" as generic metrics for completed requests.
+# ================== MONEY ==================
 def eur_to_cents(x: float) -> int:
     return int(round(x * 100))
 
@@ -55,7 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT,
   language TEXT DEFAULT 'et',
   status TEXT DEFAULT 'NEW',          -- NEW/PENDING/SAFE/DECLINED
-  state TEXT DEFAULT NULL,            -- NULL/WAITING_REF/REQ_DESC
+  state TEXT DEFAULT NULL,            -- NULL/WAITING_REF
   spent_cents BIGINT NOT NULL DEFAULT 0,
   discount_cents BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -114,6 +113,8 @@ ALTER_USERS_SQL = [
 ALTER_REQUESTS_SQL = [
     "ALTER TABLE requests ADD COLUMN IF NOT EXISTS fee_cents INT NOT NULL DEFAULT 0;",
     "ALTER TABLE requests ADD COLUMN IF NOT EXISTS total_cents INT NOT NULL DEFAULT 0;",
+    "ALTER TABLE requests ADD COLUMN IF NOT EXISTS use_discount BOOLEAN NOT NULL DEFAULT false;",
+    "ALTER TABLE requests ADD COLUMN IF NOT EXISTS discount_used_cents INT NOT NULL DEFAULT 0;",
     "ALTER TABLE requests ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'NEW';",
     "ALTER TABLE requests ADD COLUMN IF NOT EXISTS admin_message_id BIGINT NULL;",
 ]
@@ -132,25 +133,16 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "removed_safe": "❌ Admin eemaldas sind SAFE listist. Tee /start ja verifitseeri uuesti.",
         "added_safe": "✅ Admin lisas sind SAFE listi. Tee /start",
         "do_start": "Tee /start",
-
         "safe_welcome": (
-            "*Private Hub*\n\n"
+            "<b>Private Hub</b>\n\n"
             "Siin saad esitada päringuid ja hallata oma infot.\n"
             "Vali alt menüüst üks valik."
         ),
-
         "help_text": "Help: kirjuta adminile.",
-        "account_text": "Account",
-
-        "requests_title": "*Requests*\nVali päring.",
+        "account_text": "<b>Account</b>",
+        "requests_title": "<b>Requests</b>\nVali päring.",
         "requests_empty": "Sul pole aktiivseid päringuid.",
         "request_new": "➕ New request",
-        "buy": "🛒 Buy",
-        "discount_use_prompt": "Sul on discount: {amount}. Kas tahad seda kasutada?",
-        "discount_yes": "✅ Kasuta discounti",
-        "discount_no": "❌ Ära kasuta",
-        "discount_added": "🎁 Su kontole lisati uus discount: {amount}.\nBuy ajal saad valida kas kasutad või mitte.",
-        "discount_applied": "🎁 Discount kasutatud: {amount}.\nUus TOTAL: {total}",
         "request_enter_title": "Kirjuta päringu pealkiri (1 rida).",
         "request_enter_details": "Kirjuta päringu detailid.",
         "request_sent": "✅ Päring saadetud. Admin vaatab üle.",
@@ -158,14 +150,29 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "request_cancel_confirm": "✅ Confirm cancel",
         "request_cancelled_user": "✅ Päring cancelled.",
         "request_cancelled_admin": "❌ USER CANCELLED",
-
         "admin_fee_prompt": "Kirjuta fee EUR (näiteks: 5 või 7.50):",
-
         "search_usage": "Usage: /search @username",
         "search_not_found": "❌ User not found in database.",
-
         "back": "⬅️ Tagasi",
         "home": "⬅️ Home",
+        "op_online": "🟢 Operator: ONLINE",
+        "op_offline": "🔴 Operator: OFFLINE",
+        "op_offline_block": "🔴 Operator on hetkel OFFLINE. Uus päring on ajutiselt kinni.",
+        "admin_online_set": "✅ Operator ONLINE.",
+        "admin_offline_set": "✅ Operator OFFLINE.",
+
+        # menu labels (for language switching)
+        "menu_requests": "Requests",
+        "menu_account": "Account",
+        "menu_help": "Help",
+        "menu_list": "📄 List",
+
+        # discount
+        "discount_use_prompt": "Sul on discount: {amount}. Kas tahad seda kasutada?",
+        "discount_yes": "✅ Kasuta discounti",
+        "discount_no": "❌ Ära kasuta",
+        "discount_added": "🎁 Su kontole lisandus uus discount: {amount}.\nKui tahad seda kasutada, vali ostmise ajal \"Kasuta discounti\".",
+        "discount_applied": "🎁 Discount kasutatud: {amount}.\nUus TOTAL: {total}",
     },
     "ru": {
         "welcome": "Привет! Нажми Verify",
@@ -179,25 +186,16 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "removed_safe": "❌ Админ удалил тебя из SAFE. Сделай /start и проверься снова.",
         "added_safe": "✅ Админ добавил тебя в SAFE. Напиши /start",
         "do_start": "Напиши /start",
-
         "safe_welcome": (
-            "*Private Hub*\n\n"
+            "<b>Private Hub</b>\n\n"
             "Здесь ты можешь отправлять запросы и управлять информацией.\n"
             "Выбери пункт меню ниже."
         ),
-
         "help_text": "Help: напиши админу.",
-        "account_text": "Account",
-
-        "requests_title": "*Requests*\nВыбери запрос.",
+        "account_text": "<b>Account</b>",
+        "requests_title": "<b>Requests</b>\nВыбери запрос.",
         "requests_empty": "У тебя нет активных запросов.",
         "request_new": "➕ New request",
-        "buy": "🛒 Buy",
-        "discount_use_prompt": "У тебя есть discount: {amount}. Использовать его?",
-        "discount_yes": "✅ Использовать discount",
-        "discount_no": "❌ Не использовать",
-        "discount_added": "🎁 На твой аккаунт добавлен новый discount: {amount}.\nВо время Buy ты сможешь выбрать использовать или нет.",
-        "discount_applied": "🎁 Discount применён: {amount}.\nНовый TOTAL: {total}",
         "request_enter_title": "Отправь заголовок запроса (1 строка).",
         "request_enter_details": "Отправь детали запроса.",
         "request_sent": "✅ Запрос отправлен. Админ посмотрит.",
@@ -205,14 +203,27 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "request_cancel_confirm": "✅ Confirm cancel",
         "request_cancelled_user": "✅ Запрос отменён.",
         "request_cancelled_admin": "❌ USER CANCELLED",
-
         "admin_fee_prompt": "Отправь fee EUR (пример: 5 или 7.50):",
-
         "search_usage": "Usage: /search @username",
         "search_not_found": "❌ User not found in database.",
-
         "back": "⬅️ Назад",
         "home": "⬅️ Home",
+        "op_online": "🟢 Operator: ONLINE",
+        "op_offline": "🔴 Operator: OFFLINE",
+        "op_offline_block": "🔴 Operator сейчас OFFLINE. Новый запрос временно закрыт.",
+        "admin_online_set": "✅ Operator ONLINE.",
+        "admin_offline_set": "✅ Operator OFFLINE.",
+
+        "menu_requests": "Requests",
+        "menu_account": "Account",
+        "menu_help": "Help",
+        "menu_list": "📄 List",
+
+        "discount_use_prompt": "У тебя есть discount: {amount}. Использовать его?",
+        "discount_yes": "✅ Использовать discount",
+        "discount_no": "❌ Не использовать",
+        "discount_added": "🎁 На твой аккаунт добавлен новый discount: {amount}.\nЧтобы использовать его, во время покупки выбери \"Использовать discount\".",
+        "discount_applied": "🎁 Discount применён: {amount}.\nНовый TOTAL: {total}",
     },
     "en": {
         "welcome": "Hi! Press Verify",
@@ -226,25 +237,16 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "removed_safe": "❌ Admin removed you from SAFE. Do /start and verify again.",
         "added_safe": "✅ Admin added you to SAFE. Send /start",
         "do_start": "Send /start",
-
         "safe_welcome": (
-            "*Private Hub*\n\n"
+            "<b>Private Hub</b>\n\n"
             "Submit requests and manage your info.\n"
             "Choose an option below."
         ),
-
         "help_text": "Help: contact admin.",
-        "account_text": "Account",
-
-        "requests_title": "*Requests*\nPick a request.",
+        "account_text": "<b>Account</b>",
+        "requests_title": "<b>Requests</b>\nPick a request.",
         "requests_empty": "You have no active requests.",
         "request_new": "➕ New request",
-        "buy": "🛒 Buy",
-        "discount_use_prompt": "You have a discount: {amount}. Use it?",
-        "discount_yes": "✅ Use discount",
-        "discount_no": "❌ Don't use",
-        "discount_added": "🎁 A new discount was added to your account: {amount}.\nDuring Buy you can choose to use it or not.",
-        "discount_applied": "🎁 Discount applied: {amount}.\nNew TOTAL: {total}",
         "request_enter_title": "Send request title (1 line).",
         "request_enter_details": "Send request details.",
         "request_sent": "✅ Request sent. Admin will review.",
@@ -252,14 +254,27 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "request_cancel_confirm": "✅ Confirm cancel",
         "request_cancelled_user": "✅ Request cancelled.",
         "request_cancelled_admin": "❌ USER CANCELLED",
-
         "admin_fee_prompt": "Send fee EUR (example: 5 or 7.50):",
-
         "search_usage": "Usage: /search @username",
         "search_not_found": "❌ User not found in database.",
-
         "back": "⬅️ Back",
         "home": "⬅️ Home",
+        "op_online": "🟢 Operator: ONLINE",
+        "op_offline": "🔴 Operator: OFFLINE",
+        "op_offline_block": "🔴 Operator is OFFLINE. New request is temporarily disabled.",
+        "admin_online_set": "✅ Operator ONLINE.",
+        "admin_offline_set": "✅ Operator OFFLINE.",
+
+        "menu_requests": "Requests",
+        "menu_account": "Account",
+        "menu_help": "Help",
+        "menu_list": "📄 List",
+
+        "discount_use_prompt": "You have a discount: {amount}. Use it?",
+        "discount_yes": "✅ Use discount",
+        "discount_no": "❌ Don't use",
+        "discount_added": "🎁 A new discount was added to your account: {amount}.\nTo use it, choose \"Use discount\" during purchase.",
+        "discount_applied": "🎁 Discount applied: {amount}.\nNew TOTAL: {total}",
     },
 }
 
@@ -268,6 +283,10 @@ def t(lang: str, key: str) -> str:
     if lang not in TEXTS:
         lang = "et"
     return TEXTS[lang].get(key, TEXTS["et"].get(key, key))
+
+
+def esc(s: str) -> str:
+    return html.escape(s or "", quote=False)
 
 
 # ================== KEYBOARDS ==================
@@ -291,15 +310,13 @@ def kb_languages_and_verify(lang: str) -> InlineKeyboardMarkup:
 
 
 def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
+    # SAME MENU LAYOUT AS BEFORE, only button texts translate now
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t(lang, "buy"), callback_data="safe:buy")],
         [
-            InlineKeyboardButton("Requests", callback_data="safe:requests"),
-            InlineKeyboardButton("Account", callback_data="safe:account"),
+            InlineKeyboardButton(t(lang, "menu_requests"), callback_data="safe:requests"),
+            InlineKeyboardButton(t(lang, "menu_account"), callback_data="safe:account"),
         ],
-        [
-            InlineKeyboardButton("Help", callback_data="safe:help"),
-        ],
+        [InlineKeyboardButton(t(lang, "menu_help"), callback_data="safe:help")],
         [
             InlineKeyboardButton("🇪🇪 ET", callback_data="lang:et"),
             InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
@@ -308,18 +325,12 @@ def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
     ])
 
 
-def kb_buy_discount_choice(lang: str, balance_cents: int) -> InlineKeyboardMarkup:
-    bal = cents_to_eur_str(int(balance_cents))
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t(lang, 'discount_yes')} ({bal})", callback_data="buy:disc:yes")],
-        [InlineKeyboardButton(t(lang, "discount_no"), callback_data="buy:disc:no")],
-        [InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")],
-    ])
-
-def kb_requests_home(lang: str, has_any: bool) -> InlineKeyboardMarkup:
+def kb_requests_home(lang: str, has_any: bool, operator_online: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
+    if operator_online:
+        rows.append([InlineKeyboardButton(t(lang, "request_new"), callback_data="req:new")])
     if has_any:
-        rows.append([InlineKeyboardButton("📄 List", callback_data="req:list")])
+        rows.append([InlineKeyboardButton(t(lang, "menu_list"), callback_data="req:list")])
     rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -352,6 +363,16 @@ def kb_request_cancel_confirm(lang: str, request_id: int) -> InlineKeyboardMarku
     ])
 
 
+def kb_discount_choice(lang: str, balance_cents: int) -> InlineKeyboardMarkup:
+    bal = cents_to_eur_str(int(balance_cents))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{t(lang, 'discount_yes')} ({bal})", callback_data="disc:yes")],
+        [InlineKeyboardButton(t(lang, "discount_no"), callback_data="disc:no")],
+        [InlineKeyboardButton(t(lang, "back"), callback_data="safe:requests")],
+        [InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")],
+    ])
+
+
 def kb_admin_claim_decision(claim_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Accept", callback_data=f"adm:acc:{claim_id}"),
@@ -365,8 +386,9 @@ def kb_admin_remove(user_id: int) -> InlineKeyboardMarkup:
 
 def kb_admin_request(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Complete", callback_data=f"r:complete:{request_id}"),
+        InlineKeyboardButton("👀 Review", callback_data=f"r:review:{request_id}"),
         InlineKeyboardButton("💰 Fee", callback_data=f"r:fee:{request_id}"),
+        InlineKeyboardButton("✅ Complete", callback_data=f"r:complete:{request_id}"),
     ]])
 
 
@@ -422,6 +444,8 @@ async def add_spent(pool: asyncpg.Pool, user_id: int, add_cents: int) -> None:
         int(add_cents), user_id
     )
 
+
+# ---------- DISCOUNT ----------
 async def add_discount(pool: asyncpg.Pool, user_id: int, add_cents: int) -> None:
     await pool.execute(
         "UPDATE users SET discount_cents = discount_cents + $1, updated_at=now() WHERE user_id=$2",
@@ -435,7 +459,6 @@ async def get_discount_cents(pool: asyncpg.Pool, user_id: int) -> int:
 
 
 async def subtract_discount(pool: asyncpg.Pool, user_id: int, sub_cents: int) -> None:
-    # never go below 0
     await pool.execute(
         "UPDATE users SET discount_cents = GREATEST(discount_cents - $1, 0), updated_at=now() WHERE user_id=$2",
         int(sub_cents), int(user_id)
@@ -465,7 +488,8 @@ async def get_setting(pool: asyncpg.Pool, key: str, default: str) -> str:
 
 async def set_setting(pool: asyncpg.Pool, key: str, value: str) -> None:
     await pool.execute(
-        "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+        "INSERT INTO settings (key, value) VALUES ($1, $2) "
+        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
         key, value
     )
 
@@ -489,7 +513,12 @@ async def get_request(pool: asyncpg.Pool, request_id: int) -> Optional[asyncpg.R
 
 async def list_user_active_requests(pool: asyncpg.Pool, user_id: int) -> List[asyncpg.Record]:
     return await pool.fetch(
-        "SELECT id, status, total_cents FROM requests WHERE user_id=$1 AND status NOT IN ('DONE','CANCELLED') ORDER BY id DESC",
+        """
+        SELECT id, status, total_cents
+        FROM requests
+        WHERE user_id=$1 AND status NOT IN ('DONE','CANCELLED')
+        ORDER BY id DESC
+        """,
         user_id
     )
 
@@ -499,7 +528,10 @@ async def cancel_request(pool: asyncpg.Pool, request_id: int) -> None:
 
 
 async def set_request_fee(pool: asyncpg.Pool, request_id: int, fee_cents: int) -> int:
-    """Sets fee and calculates TOTAL. Returns discount_used_cents applied."""
+    """
+    Sets fee and total. If request.use_discount is true, applies user's discount balance.
+    Returns discount_used_cents.
+    """
     r = await get_request(pool, int(request_id))
     if not r:
         return 0
@@ -510,7 +542,7 @@ async def set_request_fee(pool: asyncpg.Pool, request_id: int, fee_cents: int) -
     discount_used = 0
     total = int(fee_cents)
 
-    if use_discount:
+    if use_discount and fee_cents > 0:
         bal = await get_discount_cents(pool, user_id)
         discount_used = min(int(fee_cents), int(bal))
         total = int(fee_cents) - int(discount_used)
@@ -522,12 +554,18 @@ async def set_request_fee(pool: asyncpg.Pool, request_id: int, fee_cents: int) -
         UPDATE requests
         SET fee_cents=$1,
             discount_used_cents=$2,
-            total_cents=$3
+            total_cents=$3,
+            status=CASE WHEN status='NEW' THEN 'IN_REVIEW' ELSE status END
         WHERE id=$4
         """,
         int(fee_cents), int(discount_used), int(total), int(request_id)
     )
     return int(discount_used)
+
+
+async def set_request_status(pool: asyncpg.Pool, request_id: int, status: str) -> None:
+    await pool.execute("UPDATE requests SET status=$1 WHERE id=$2", status, int(request_id))
+
 
 async def mark_request_done(pool: asyncpg.Pool, request_id: int) -> None:
     await pool.execute("UPDATE requests SET status='DONE' WHERE id=$1", int(request_id))
@@ -573,23 +611,33 @@ def is_admin(uid: Optional[int]) -> bool:
     return uid == ADMIN_ID_INT
 
 
+async def is_operator_online(pool: asyncpg.Pool) -> bool:
+    v = await get_setting(pool, "operator_online", "true")
+    return str(v).lower() in ("1", "true", "yes", "on")
+
+
 # ================== HOME ==================
 async def send_home(chat_id: int, lang: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    online = await is_operator_online(pool)
+    status_line = t(lang, "op_online") if online else t(lang, "op_offline")
+    caption = t(lang, "safe_welcome") + "\n\n" + esc(status_line)
+
     try:
         with open(HOME_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=InputFile(f, filename="home.png"),
-                caption=t(lang, "safe_welcome"),
+                caption=caption,
                 reply_markup=kb_safe_menu(lang),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
     except FileNotFoundError:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=t(lang, "safe_welcome"),
+            text=caption,
             reply_markup=kb_safe_menu(lang),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
 
@@ -720,20 +768,10 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             new_lang = "et"
         await set_language(pool, user.id, new_lang)
 
-        # refresh current simple screen
+        # refresh current screen
         if status == "SAFE":
-            if is_photo:
-                await query.edit_message_caption(
-                    caption=t(new_lang, "safe_welcome"),
-                    reply_markup=kb_safe_menu(new_lang),
-                    parse_mode="Markdown",
-                )
-            else:
-                await query.edit_message_text(
-                    t(new_lang, "safe_welcome"),
-                    reply_markup=kb_safe_menu(new_lang),
-                    parse_mode="Markdown",
-                )
+            # send fresh home so buttons/text fully switch language
+            await send_home(query.message.chat_id, new_lang, context)
             return
 
         if status == "PENDING":
@@ -748,13 +786,6 @@ async def on_lang_or_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await query.edit_message_caption(caption=t(new_lang, "waiting_ref"), reply_markup=kb_languages())
             else:
                 await query.edit_message_text(t(new_lang, "waiting_ref"), reply_markup=kb_languages())
-            return
-
-        if state == "REQ_DESC":
-            if is_photo:
-                await query.edit_message_caption(caption="...", reply_markup=kb_languages())
-            else:
-                await query.edit_message_text("...", reply_markup=kb_languages())
             return
 
         if is_photo:
@@ -811,11 +842,16 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "safe:account":
         spent = int(db_user["spent_cents"] or 0)
+        disc = int(db_user["discount_cents"] or 0)
         done_count = await count_done_requests(pool, user.id)
         await query.edit_message_text(
-            f"{t(lang,'account_text')}\n\nUser ID: `{user.id}`\nSpent: `{cents_to_eur_str(spent)}`\nDiscount: `{cents_to_eur_str(int(db_user['discount_cents'] or 0))}`\nCompleted: `{done_count}`",
+            f"{t(lang,'account_text')}\n\n"
+            f"User ID: <code>{user.id}</code>\n"
+            f"Spent: <code>{esc(cents_to_eur_str(spent))}</code>\n"
+            f"Discount: <code>{esc(cents_to_eur_str(disc))}</code>\n"
+            f"Completed: <code>{done_count}</code>",
             reply_markup=kb_safe_menu(lang),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         return
 
@@ -823,36 +859,23 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_home(chat_id, lang, context)
         return
 
-
-if data == "safe:buy":
-    bal = await get_discount_cents(pool, user.id)
-    if bal > 0:
-        msg = t(lang, "discount_use_prompt").format(amount=cents_to_eur_str(bal))
-        await query.edit_message_text(
-            msg,
-            reply_markup=kb_buy_discount_choice(lang, bal),
-            parse_mode="Markdown",
-        )
-        return
-
-    # no discount -> go straight to buy wizard
-    context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": False}
-    await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
-    return
-
     if data == "safe:requests":
         reqs = await list_user_active_requests(pool, user.id)
+        online = await is_operator_online(pool)
         has_any = len(reqs) > 0
+        header = t(lang, "requests_title")
+        if not online:
+            header = header + "\n\n" + esc(t(lang, "op_offline_block"))
         await query.edit_message_text(
-            t(lang, "requests_title"),
-            reply_markup=kb_requests_home(lang, has_any),
-            parse_mode="Markdown",
+            header,
+            reply_markup=kb_requests_home(lang, has_any, online),
+            parse_mode="HTML",
         )
         return
 
 
-# ================== BUY (DISCOUNT) CALLBACKS ==================
-async def buy_discount_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ================== DISCOUNT CHOICE CALLBACK ==================
+async def discount_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
@@ -866,15 +889,28 @@ async def buy_discount_callback(update: Update, context: ContextTypes.DEFAULT_TY
     db_user = await get_user(pool, user.id)
     lang = (db_user["language"] if db_user and db_user["language"] else "et")
     status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+
     if status != "SAFE":
         await query.edit_message_text(t(lang, "do_start"), reply_markup=kb_languages())
         return
 
-    data = query.data or ""
-    use_discount = (data == "buy:disc:yes")
-    context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": use_discount}
+    online = await is_operator_online(pool)
+    if not online:
+        await query.edit_message_text(
+            esc(t(lang, "op_offline_block")),
+            reply_markup=kb_safe_menu(lang),
+            parse_mode="HTML",
+        )
+        return
 
+    data = query.data or ""
+    use_discount = (data == "disc:yes")
+
+    # start the SAME request wizard as before, just with use_discount flag
+    context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": use_discount}
     await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
+    return
+
 
 # ================== REQUEST USER CALLBACKS ==================
 async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -898,8 +934,26 @@ async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data or ""
     parts = data.split(":")
 
-    # req:new -> start wizard
+    # req:new -> start wizard (only if operator online) + DISCOUNT prompt if user has any
     if data == "req:new":
+        online = await is_operator_online(pool)
+        if not online:
+            await query.edit_message_text(
+                esc(t(lang, "op_offline_block")),
+                reply_markup=kb_safe_menu(lang),
+                parse_mode="HTML",
+            )
+            return
+
+        bal = int(db_user["discount_cents"] or 0)
+        if bal > 0:
+            await query.edit_message_text(
+                t(lang, "discount_use_prompt").format(amount=cents_to_eur_str(bal)),
+                reply_markup=kb_discount_choice(lang, bal),
+                parse_mode="HTML",
+            )
+            return
+
         context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": False}
         await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
         return
@@ -910,7 +964,11 @@ async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if not reqs:
             await query.edit_message_text(t(lang, "requests_empty"), reply_markup=kb_safe_menu(lang))
             return
-        await query.edit_message_text(t(lang, "requests_title"), reply_markup=kb_requests_list(lang, reqs), parse_mode="Markdown")
+        await query.edit_message_text(
+            t(lang, "requests_title"),
+            reply_markup=kb_requests_list(lang, reqs),
+            parse_mode="HTML"
+        )
         return
 
     # req:view:<id>, req:cancel:<id>, req:confirm:<id>
@@ -926,30 +984,30 @@ async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TY
         can_cancel = st in ("NEW", "IN_REVIEW")
 
         detail = (
-            f"*Request* #{rid}\n\n"
-            f"Status: {st}\n\n"
-            f"Title: {r['title']}\n\n"
-            f"Details:\n{r['details']}\n\n"
-            f"Use discount: {'YES' if bool(r.get('use_discount') or False) else 'NO'}\n"
-            f"Discount used: {cents_to_eur_str(int(r.get('discount_used_cents') or 0))}\n"
-            f"Fee: {cents_to_eur_str(int(r['fee_cents']))}\n"
-            f"TOTAL: {cents_to_eur_str(int(r['total_cents']))}\n"
+            f"<b>Request</b> #{rid}\n\n"
+            f"Status: <code>{esc(st)}</code>\n\n"
+            f"Title: {esc(str(r['title']))}\n\n"
+            f"Details:\n{esc(str(r['details']))}\n\n"
+            f"Use discount: <code>{'YES' if bool(r.get('use_discount') or False) else 'NO'}</code>\n"
+            f"Discount used: <code>{esc(cents_to_eur_str(int(r.get('discount_used_cents') or 0)))}</code>\n"
+            f"Fee: <code>{esc(cents_to_eur_str(int(r['fee_cents'])))}</code>\n"
+            f"TOTAL: <code>{esc(cents_to_eur_str(int(r['total_cents'])))}</code>\n"
         )
 
         if action == "view":
-            await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, can_cancel), parse_mode="Markdown")
+            await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, can_cancel), parse_mode="HTML")
             return
 
         if action == "cancel":
             if not can_cancel:
-                await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, False), parse_mode="Markdown")
+                await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, False), parse_mode="HTML")
                 return
-            await query.edit_message_text(detail + "\n❓", reply_markup=kb_request_cancel_confirm(lang, rid), parse_mode="Markdown")
+            await query.edit_message_text(detail + "\n❓", reply_markup=kb_request_cancel_confirm(lang, rid), parse_mode="HTML")
             return
 
         if action == "confirm":
             if not can_cancel:
-                await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, False), parse_mode="Markdown")
+                await query.edit_message_text(detail, reply_markup=kb_request_detail(lang, rid, False), parse_mode="HTML")
                 return
 
             await cancel_request(pool, rid)
@@ -1005,6 +1063,16 @@ async def admin_request_callback(update: Update, context: ContextTypes.DEFAULT_T
             pass
         return
 
+    if action == "review":
+        await set_request_status(pool, rid, "IN_REVIEW")
+        await refresh_admin_request_message(pool, context, rid)
+        user_id = int(r["user_id"])
+        try:
+            await context.bot.send_message(chat_id=user_id, text="👀 In review.")
+        except Exception:
+            pass
+        return
+
     if action == "fee":
         context.user_data["fee_input"] = {"request_id": rid}
         await context.bot.send_message(chat_id=ADMIN_ID_INT, text=t("et", "admin_fee_prompt"))
@@ -1029,7 +1097,7 @@ async def admin_request_callback(update: Update, context: ContextTypes.DEFAULT_T
 
         # notify user
         u = await get_user(pool, user_id)
-        lang = (u["language"] if u and u.get("language") else "et")
+        u_lang = (u["language"] if u and u.get("language") else "et")
         try:
             await context.bot.send_message(chat_id=user_id, text=f"✅ Completed.\nTOTAL: {cents_to_eur_str(total_cents)}")
         except Exception:
@@ -1074,14 +1142,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"✅ Fee set: {cents_to_eur_str(fee_cents)}")
         await refresh_admin_request_message(pool, context, rid)
 
-        # notify user if discount got applied
+        # notify user if discount applied
         try:
-            r = await get_request(pool, rid)
-            if r:
-                user_id = int(r["user_id"])
-                u = await get_user(pool, user_id)
-                u_lang = (u["language"] if u and u.get("language") else "et")
-                if int(discount_used) > 0:
+            if int(discount_used) > 0:
+                r = await get_request(pool, rid)
+                if r:
+                    user_id = int(r["user_id"])
+                    u = await get_user(pool, user_id)
+                    u_lang = (u["language"] if u and u.get("language") else "et")
                     msg = t(u_lang, "discount_applied").format(
                         amount=cents_to_eur_str(int(discount_used)),
                         total=cents_to_eur_str(int(r["total_cents"]))
@@ -1096,15 +1164,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if wiz and status == "SAFE":
         if wiz.get("step") == "TITLE":
             title = text[:80]
-            context.user_data["req_wizard"] = {"step": "DETAILS", "title": title}
+            context.user_data["req_wizard"] = {
+                "step": "DETAILS",
+                "title": title,
+                "use_discount": bool(wiz.get("use_discount") or False),
+            }
             await update.message.reply_text(t(lang, "request_enter_details"))
             return
         if wiz.get("step") == "DETAILS":
             title = wiz.get("title", "Request")
             details = text[:2000]
+            use_discount = bool(wiz.get("use_discount") or False)
             context.user_data.pop("req_wizard", None)
 
-            use_discount = bool(wiz.get('use_discount') or False)
             rid = await create_request(pool, user.id, title, details, use_discount)
             await update.message.reply_text(t(lang, "request_sent"))
 
@@ -1241,12 +1313,13 @@ async def admin_remove_safe_callback(update: Update, context: ContextTypes.DEFAU
     await query.edit_message_text((query.message.text or "") + "\n✅ Removed from SAFE.")
 
 
-# ================== ADMIN COMMANDS ==================
+# ================== ADMIN COMMANDS (ADMIN ONLY) ==================
 async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin-only.
-    /add <user_id>                  -> add SAFE
-    /add discount @username 5       -> add discount in EUR
-    /add discount <user_id> 7.50    -> add discount in EUR
+    """
+    Admin-only:
+      /add <user_id>
+      /add discount @username 5
+      /add discount <user_id> 7.50
     """
     user = update.effective_user
     if not user or not is_admin(user.id) or not update.message:
@@ -1254,10 +1327,9 @@ async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
     args = context.args or []
+
     if not args:
-        await update.message.reply_text(
-            "Usage:\n/add <user_id>\n/add discount @username 5"
-        )
+        await update.message.reply_text("Usage: /add <user_id> | /add discount @username 5")
         return
 
     if args[0].lower() == "discount":
@@ -1274,7 +1346,7 @@ async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 raise ValueError()
             add_cents = eur_to_cents(amount)
         except Exception:
-            await update.message.reply_text("❌ Amount must be a positive number. Example: /add discount @user 5")
+            await update.message.reply_text("❌ Amount must be positive. Example: /add discount @user 5")
             return
 
         # resolve user
@@ -1294,10 +1366,11 @@ async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await add_discount(pool, target_user_id, add_cents)
 
-        tu = await get_user(pool, target_user_id)
-        t_lang = (tu["language"] if tu and tu.get("language") else "et")
+        # notify user
         try:
-            msg = t(t_lang, "discount_added").format(amount=cents_to_eur_str(add_cents))
+            tu = await get_user(pool, target_user_id)
+            tu_lang = (tu["language"] if tu and tu.get("language") else "et")
+            msg = t(tu_lang, "discount_added").format(amount=cents_to_eur_str(add_cents))
             await context.bot.send_message(chat_id=target_user_id, text=msg)
         except Exception:
             pass
@@ -1305,24 +1378,23 @@ async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"✅ Discount added: {cents_to_eur_str(add_cents)} -> {target}")
         return
 
-    # default: add SAFE
-    if len(args) == 1 and args[0].isdigit():
-        user_id = int(args[0])
-        await ensure_user_exists(pool, user_id)
-        await set_status(pool, user_id, "SAFE")
-        await set_state(pool, user_id, None)
-        target_user = await get_user(pool, user_id)
-        target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
-        try:
-            await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"))
-        except Exception:
-            pass
-        await update.message.reply_text("✅ Added to SAFE list.")
+    # default: /add <user_id> => SAFE
+    if len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text("Usage: /add <user_id> | /add discount @username 5")
         return
 
-    await update.message.reply_text(
-        "Usage:\n/add <user_id>\n/add discount @username 5"
-    )
+    user_id = int(args[0])
+    await ensure_user_exists(pool, user_id)
+    await set_status(pool, user_id, "SAFE")
+    await set_state(pool, user_id, None)
+    target_user = await get_user(pool, user_id)
+    target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
+    try:
+        await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"))
+    except Exception:
+        pass
+    await update.message.reply_text("✅ Added to SAFE list.")
+
 
 async def admin_remove_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -1363,6 +1435,7 @@ async def admin_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     user_id = int(u["user_id"])
     spent = int(u["spent_cents"] or 0)
+    disc = int(u["discount_cents"] or 0)
     done_count = await count_done_requests(pool, user_id)
     status = (u["status"] or "NEW")
     safe_flag = "✅" if status == "SAFE" else "❌"
@@ -1374,6 +1447,7 @@ async def admin_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"User ID: {user_id}\n"
         f"SAFE: {safe_flag} ({status})\n"
         f"Spent: {cents_to_eur_str(spent)}\n"
+        f"Discount: {cents_to_eur_str(disc)}\n"
         f"Completed: {done_count}\n"
     )
     await update.message.reply_text(msg)
@@ -1392,7 +1466,7 @@ def main() -> None:
     # user
     app.add_handler(CommandHandler("start", start_cmd))
 
-    # admin commands
+    # admin commands (ALL admin-only)
     app.add_handler(CommandHandler("add", admin_add_safe))
     app.add_handler(CommandHandler("remove", admin_remove_safe))
     app.add_handler(CommandHandler("search", admin_search))
@@ -1400,14 +1474,14 @@ def main() -> None:
 
     # callbacks
     app.add_handler(CallbackQueryHandler(on_lang_or_verify, pattern=r"^(lang:(et|ru|en)|verify)$"))
-    app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(buy|requests|help|account|home)$"))
-    app.add_handler(CallbackQueryHandler(buy_discount_callback, pattern=r"^buy:disc:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(requests|help|account|home)$"))
+    app.add_handler(CallbackQueryHandler(discount_choice_callback, pattern=r"^disc:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(request_user_callback, pattern=r"^req:(new|list|view|cancel|confirm)(:\d+)?$"))
 
     # admin callbacks
     app.add_handler(CallbackQueryHandler(admin_claim_decision, pattern=r"^adm:(acc|dec):\d+$"))
     app.add_handler(CallbackQueryHandler(admin_remove_safe_callback, pattern=r"^adm:rem:\d+$"))
-    app.add_handler(CallbackQueryHandler(admin_request_callback, pattern=r"^r:(complete|fee):\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_request_callback, pattern=r"^r:(review|fee|complete):\d+$"))
 
     # messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
