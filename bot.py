@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS users (
   status TEXT DEFAULT 'NEW',          -- NEW/PENDING/SAFE/DECLINED
   state TEXT DEFAULT NULL,            -- NULL/WAITING_REF/REQ_DESC
   spent_cents BIGINT NOT NULL DEFAULT 0,
+  discount_cents BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -89,6 +90,8 @@ CREATE TABLE IF NOT EXISTS requests (
   details TEXT NOT NULL,
   fee_cents INT NOT NULL DEFAULT 0,
   total_cents INT NOT NULL DEFAULT 0,
+  use_discount BOOLEAN NOT NULL DEFAULT false,
+  discount_used_cents INT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'NEW',     -- NEW/IN_REVIEW/DONE/CANCELLED
   admin_message_id BIGINT NULL,
   created_at TIMESTAMPTZ DEFAULT now()
@@ -103,6 +106,7 @@ ALTER_USERS_SQL = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS spent_cents BIGINT NOT NULL DEFAULT 0;",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS discount_cents BIGINT NOT NULL DEFAULT 0;",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();",
 ]
@@ -141,6 +145,12 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "requests_title": "*Requests*\nVali päring.",
         "requests_empty": "Sul pole aktiivseid päringuid.",
         "request_new": "➕ New request",
+        "buy": "🛒 Buy",
+        "discount_use_prompt": "Sul on discount: {amount}. Kas tahad seda kasutada?",
+        "discount_yes": "✅ Kasuta discounti",
+        "discount_no": "❌ Ära kasuta",
+        "discount_added": "🎁 Su kontole lisati uus discount: {amount}.\nBuy ajal saad valida kas kasutad või mitte.",
+        "discount_applied": "🎁 Discount kasutatud: {amount}.\nUus TOTAL: {total}",
         "request_enter_title": "Kirjuta päringu pealkiri (1 rida).",
         "request_enter_details": "Kirjuta päringu detailid.",
         "request_sent": "✅ Päring saadetud. Admin vaatab üle.",
@@ -182,6 +192,12 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "requests_title": "*Requests*\nВыбери запрос.",
         "requests_empty": "У тебя нет активных запросов.",
         "request_new": "➕ New request",
+        "buy": "🛒 Buy",
+        "discount_use_prompt": "У тебя есть discount: {amount}. Использовать его?",
+        "discount_yes": "✅ Использовать discount",
+        "discount_no": "❌ Не использовать",
+        "discount_added": "🎁 На твой аккаунт добавлен новый discount: {amount}.\nВо время Buy ты сможешь выбрать использовать или нет.",
+        "discount_applied": "🎁 Discount применён: {amount}.\nНовый TOTAL: {total}",
         "request_enter_title": "Отправь заголовок запроса (1 строка).",
         "request_enter_details": "Отправь детали запроса.",
         "request_sent": "✅ Запрос отправлен. Админ посмотрит.",
@@ -223,6 +239,12 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "requests_title": "*Requests*\nPick a request.",
         "requests_empty": "You have no active requests.",
         "request_new": "➕ New request",
+        "buy": "🛒 Buy",
+        "discount_use_prompt": "You have a discount: {amount}. Use it?",
+        "discount_yes": "✅ Use discount",
+        "discount_no": "❌ Don't use",
+        "discount_added": "🎁 A new discount was added to your account: {amount}.\nDuring Buy you can choose to use it or not.",
+        "discount_applied": "🎁 Discount applied: {amount}.\nNew TOTAL: {total}",
         "request_enter_title": "Send request title (1 line).",
         "request_enter_details": "Send request details.",
         "request_sent": "✅ Request sent. Admin will review.",
@@ -270,6 +292,7 @@ def kb_languages_and_verify(lang: str) -> InlineKeyboardMarkup:
 
 def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(lang, "buy"), callback_data="safe:buy")],
         [
             InlineKeyboardButton("Requests", callback_data="safe:requests"),
             InlineKeyboardButton("Account", callback_data="safe:account"),
@@ -285,10 +308,16 @@ def kb_safe_menu(lang: str) -> InlineKeyboardMarkup:
     ])
 
 
+def kb_buy_discount_choice(lang: str, balance_cents: int) -> InlineKeyboardMarkup:
+    bal = cents_to_eur_str(int(balance_cents))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{t(lang, 'discount_yes')} ({bal})", callback_data="buy:disc:yes")],
+        [InlineKeyboardButton(t(lang, "discount_no"), callback_data="buy:disc:no")],
+        [InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")],
+    ])
+
 def kb_requests_home(lang: str, has_any: bool) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(t(lang, "request_new"), callback_data="req:new")],
-    ]
+    rows: List[List[InlineKeyboardButton]] = []
     if has_any:
         rows.append([InlineKeyboardButton("📄 List", callback_data="req:list")])
     rows.append([InlineKeyboardButton(t(lang, "home"), callback_data="safe:home")])
@@ -393,6 +422,25 @@ async def add_spent(pool: asyncpg.Pool, user_id: int, add_cents: int) -> None:
         int(add_cents), user_id
     )
 
+async def add_discount(pool: asyncpg.Pool, user_id: int, add_cents: int) -> None:
+    await pool.execute(
+        "UPDATE users SET discount_cents = discount_cents + $1, updated_at=now() WHERE user_id=$2",
+        int(add_cents), int(user_id)
+    )
+
+
+async def get_discount_cents(pool: asyncpg.Pool, user_id: int) -> int:
+    row = await pool.fetchrow("SELECT discount_cents FROM users WHERE user_id=$1", int(user_id))
+    return int(row["discount_cents"] if row and row["discount_cents"] is not None else 0)
+
+
+async def subtract_discount(pool: asyncpg.Pool, user_id: int, sub_cents: int) -> None:
+    # never go below 0
+    await pool.execute(
+        "UPDATE users SET discount_cents = GREATEST(discount_cents - $1, 0), updated_at=now() WHERE user_id=$2",
+        int(sub_cents), int(user_id)
+    )
+
 
 async def create_claim(pool: asyncpg.Pool, user_id: int, ref_username: str) -> int:
     row = await pool.fetchrow(
@@ -423,14 +471,14 @@ async def set_setting(pool: asyncpg.Pool, key: str, value: str) -> None:
 
 
 # Requests
-async def create_request(pool: asyncpg.Pool, user_id: int, title: str, details: str) -> int:
+async def create_request(pool: asyncpg.Pool, user_id: int, title: str, details: str, use_discount: bool) -> int:
     row = await pool.fetchrow(
         """
-        INSERT INTO requests (user_id, title, details, fee_cents, total_cents, status)
-        VALUES ($1, $2, $3, 0, 0, 'NEW')
+        INSERT INTO requests (user_id, title, details, fee_cents, total_cents, use_discount, discount_used_cents, status)
+        VALUES ($1, $2, $3, 0, 0, $4, 0, 'NEW')
         RETURNING id
         """,
-        user_id, title, details
+        user_id, title, details, bool(use_discount)
     )
     return int(row["id"])
 
@@ -450,12 +498,36 @@ async def cancel_request(pool: asyncpg.Pool, request_id: int) -> None:
     await pool.execute("UPDATE requests SET status='CANCELLED' WHERE id=$1", int(request_id))
 
 
-async def set_request_fee(pool: asyncpg.Pool, request_id: int, fee_cents: int) -> None:
-    await pool.execute(
-        "UPDATE requests SET fee_cents=$1, total_cents=$1 WHERE id=$2",
-        int(fee_cents), int(request_id)
-    )
+async def set_request_fee(pool: asyncpg.Pool, request_id: int, fee_cents: int) -> int:
+    """Sets fee and calculates TOTAL. Returns discount_used_cents applied."""
+    r = await get_request(pool, int(request_id))
+    if not r:
+        return 0
 
+    user_id = int(r["user_id"])
+    use_discount = bool(r.get("use_discount") or False)
+
+    discount_used = 0
+    total = int(fee_cents)
+
+    if use_discount:
+        bal = await get_discount_cents(pool, user_id)
+        discount_used = min(int(fee_cents), int(bal))
+        total = int(fee_cents) - int(discount_used)
+        if discount_used > 0:
+            await subtract_discount(pool, user_id, discount_used)
+
+    await pool.execute(
+        """
+        UPDATE requests
+        SET fee_cents=$1,
+            discount_used_cents=$2,
+            total_cents=$3
+        WHERE id=$4
+        """,
+        int(fee_cents), int(discount_used), int(total), int(request_id)
+    )
+    return int(discount_used)
 
 async def mark_request_done(pool: asyncpg.Pool, request_id: int) -> None:
     await pool.execute("UPDATE requests SET status='DONE' WHERE id=$1", int(request_id))
@@ -535,6 +607,8 @@ async def build_admin_request_text(pool: asyncpg.Pool, request_id: int) -> str:
     st = str(r["status"])
     fee = cents_to_eur_str(int(r["fee_cents"]))
     total = cents_to_eur_str(int(r["total_cents"]))
+    use_disc = "YES" if bool(r.get("use_discount") or False) else "NO"
+    disc_used = cents_to_eur_str(int(r.get("discount_used_cents") or 0))
 
     return (
         "REQUEST\n\n"
@@ -545,6 +619,8 @@ async def build_admin_request_text(pool: asyncpg.Pool, request_id: int) -> str:
         f"Username: {uname}\n\n"
         f"Title: {r['title']}\n\n"
         f"Details:\n{r['details']}\n\n"
+        f"Use discount: {use_disc}\n"
+        f"Discount used: {disc_used}\n"
         f"Fee: {fee}\n"
         f"TOTAL: {total}\n"
     )
@@ -737,7 +813,7 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         spent = int(db_user["spent_cents"] or 0)
         done_count = await count_done_requests(pool, user.id)
         await query.edit_message_text(
-            f"{t(lang,'account_text')}\n\nUser ID: `{user.id}`\nSpent: `{cents_to_eur_str(spent)}`\nCompleted: `{done_count}`",
+            f"{t(lang,'account_text')}\n\nUser ID: `{user.id}`\nSpent: `{cents_to_eur_str(spent)}`\nDiscount: `{cents_to_eur_str(int(db_user['discount_cents'] or 0))}`\nCompleted: `{done_count}`",
             reply_markup=kb_safe_menu(lang),
             parse_mode="Markdown",
         )
@@ -746,6 +822,23 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "safe:home":
         await send_home(chat_id, lang, context)
         return
+
+
+if data == "safe:buy":
+    bal = await get_discount_cents(pool, user.id)
+    if bal > 0:
+        msg = t(lang, "discount_use_prompt").format(amount=cents_to_eur_str(bal))
+        await query.edit_message_text(
+            msg,
+            reply_markup=kb_buy_discount_choice(lang, bal),
+            parse_mode="Markdown",
+        )
+        return
+
+    # no discount -> go straight to buy wizard
+    context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": False}
+    await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
+    return
 
     if data == "safe:requests":
         reqs = await list_user_active_requests(pool, user.id)
@@ -757,6 +850,31 @@ async def safe_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+
+# ================== BUY (DISCOUNT) CALLBACKS ==================
+async def buy_discount_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    pool: asyncpg.Pool = context.application.bot_data["db_pool"]
+    user = update.effective_user
+    if not user:
+        return
+
+    db_user = await get_user(pool, user.id)
+    lang = (db_user["language"] if db_user and db_user["language"] else "et")
+    status = (db_user["status"] if db_user and db_user["status"] else "NEW")
+    if status != "SAFE":
+        await query.edit_message_text(t(lang, "do_start"), reply_markup=kb_languages())
+        return
+
+    data = query.data or ""
+    use_discount = (data == "buy:disc:yes")
+    context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": use_discount}
+
+    await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
 
 # ================== REQUEST USER CALLBACKS ==================
 async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -782,7 +900,7 @@ async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     # req:new -> start wizard
     if data == "req:new":
-        context.user_data["req_wizard"] = {"step": "TITLE"}
+        context.user_data["req_wizard"] = {"step": "TITLE", "use_discount": False}
         await query.edit_message_text(t(lang, "request_enter_title"), reply_markup=kb_languages())
         return
 
@@ -812,6 +930,8 @@ async def request_user_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"Status: {st}\n\n"
             f"Title: {r['title']}\n\n"
             f"Details:\n{r['details']}\n\n"
+            f"Use discount: {'YES' if bool(r.get('use_discount') or False) else 'NO'}\n"
+            f"Discount used: {cents_to_eur_str(int(r.get('discount_used_cents') or 0))}\n"
             f"Fee: {cents_to_eur_str(int(r['fee_cents']))}\n"
             f"TOTAL: {cents_to_eur_str(int(r['total_cents']))}\n"
         )
@@ -948,11 +1068,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(t("et", "admin_fee_prompt"))
             return
 
-        await set_request_fee(pool, rid, fee_cents)
+        discount_used = await set_request_fee(pool, rid, fee_cents)
         context.user_data.pop("fee_input", None)
 
         await update.message.reply_text(f"✅ Fee set: {cents_to_eur_str(fee_cents)}")
         await refresh_admin_request_message(pool, context, rid)
+
+        # notify user if discount got applied
+        try:
+            r = await get_request(pool, rid)
+            if r:
+                user_id = int(r["user_id"])
+                u = await get_user(pool, user_id)
+                u_lang = (u["language"] if u and u.get("language") else "et")
+                if int(discount_used) > 0:
+                    msg = t(u_lang, "discount_applied").format(
+                        amount=cents_to_eur_str(int(discount_used)),
+                        total=cents_to_eur_str(int(r["total_cents"]))
+                    )
+                    await context.bot.send_message(chat_id=user_id, text=msg)
+        except Exception:
+            pass
         return
 
     # --- Request wizard ---
@@ -968,7 +1104,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             details = text[:2000]
             context.user_data.pop("req_wizard", None)
 
-            rid = await create_request(pool, user.id, title, details)
+            use_discount = bool(wiz.get('use_discount') or False)
+            rid = await create_request(pool, user.id, title, details, use_discount)
             await update.message.reply_text(t(lang, "request_sent"))
 
             await notify_admin_request(pool, context, rid)
@@ -1106,26 +1243,86 @@ async def admin_remove_safe_callback(update: Update, context: ContextTypes.DEFAU
 
 # ================== ADMIN COMMANDS ==================
 async def admin_add_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only.
+    /add <user_id>                  -> add SAFE
+    /add discount @username 5       -> add discount in EUR
+    /add discount <user_id> 7.50    -> add discount in EUR
+    """
     user = update.effective_user
     if not user or not is_admin(user.id) or not update.message:
         return
+
     pool: asyncpg.Pool = context.application.bot_data["db_pool"]
     args = context.args or []
-    if len(args) != 1 or not args[0].isdigit():
-        await update.message.reply_text("Usage: /add <user_id>")
+    if not args:
+        await update.message.reply_text(
+            "Usage:\n/add <user_id>\n/add discount @username 5"
+        )
         return
-    user_id = int(args[0])
-    await ensure_user_exists(pool, user_id)
-    await set_status(pool, user_id, "SAFE")
-    await set_state(pool, user_id, None)
-    target_user = await get_user(pool, user_id)
-    target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
-    try:
-        await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"))
-    except Exception:
-        pass
-    await update.message.reply_text("✅ Added to SAFE list.")
 
+    if args[0].lower() == "discount":
+        if len(args) != 3:
+            await update.message.reply_text("Usage: /add discount @username 5")
+            return
+
+        target = args[1].strip()
+        amount_s = args[2].strip()
+
+        try:
+            amount = float(amount_s.replace(",", "."))
+            if amount <= 0:
+                raise ValueError()
+            add_cents = eur_to_cents(amount)
+        except Exception:
+            await update.message.reply_text("❌ Amount must be a positive number. Example: /add discount @user 5")
+            return
+
+        # resolve user
+        target_user_id: Optional[int] = None
+        if target.startswith("@"):
+            u = await get_user_by_username(pool, target)
+            if not u:
+                await update.message.reply_text(t("et", "search_not_found"))
+                return
+            target_user_id = int(u["user_id"])
+        elif target.isdigit():
+            target_user_id = int(target)
+            await ensure_user_exists(pool, target_user_id)
+        else:
+            await update.message.reply_text("Usage: /add discount @username 5")
+            return
+
+        await add_discount(pool, target_user_id, add_cents)
+
+        tu = await get_user(pool, target_user_id)
+        t_lang = (tu["language"] if tu and tu.get("language") else "et")
+        try:
+            msg = t(t_lang, "discount_added").format(amount=cents_to_eur_str(add_cents))
+            await context.bot.send_message(chat_id=target_user_id, text=msg)
+        except Exception:
+            pass
+
+        await update.message.reply_text(f"✅ Discount added: {cents_to_eur_str(add_cents)} -> {target}")
+        return
+
+    # default: add SAFE
+    if len(args) == 1 and args[0].isdigit():
+        user_id = int(args[0])
+        await ensure_user_exists(pool, user_id)
+        await set_status(pool, user_id, "SAFE")
+        await set_state(pool, user_id, None)
+        target_user = await get_user(pool, user_id)
+        target_lang = (target_user["language"] if target_user and target_user["language"] else "et")
+        try:
+            await context.bot.send_message(chat_id=user_id, text=t(target_lang, "added_safe"))
+        except Exception:
+            pass
+        await update.message.reply_text("✅ Added to SAFE list.")
+        return
+
+    await update.message.reply_text(
+        "Usage:\n/add <user_id>\n/add discount @username 5"
+    )
 
 async def admin_remove_safe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -1203,7 +1400,8 @@ def main() -> None:
 
     # callbacks
     app.add_handler(CallbackQueryHandler(on_lang_or_verify, pattern=r"^(lang:(et|ru|en)|verify)$"))
-    app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(requests|help|account|home)$"))
+    app.add_handler(CallbackQueryHandler(safe_menu_click, pattern=r"^safe:(buy|requests|help|account|home)$"))
+    app.add_handler(CallbackQueryHandler(buy_discount_callback, pattern=r"^buy:disc:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(request_user_callback, pattern=r"^req:(new|list|view|cancel|confirm)(:\d+)?$"))
 
     # admin callbacks
